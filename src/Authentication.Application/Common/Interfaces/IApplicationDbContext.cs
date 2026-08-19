@@ -16,6 +16,18 @@ public interface IApplicationDbContext
 
     DbSet<Product> Products { get; }
 
+    DbSet<Empresa> Empresas { get; }
+
+    DbSet<Vinculo> Vinculos { get; }
+
+    DbSet<VinculoEmpresa> VinculoEmpresas { get; }
+
+    DbSet<TenantRole> TenantRoles { get; }
+
+    DbSet<Permission> Permissions { get; }
+
+    DbSet<TenantRolePermission> TenantRolePermissions { get; }
+
     EntityEntry<TEntity> Entry<TEntity>(TEntity entity) where TEntity : class;
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken);

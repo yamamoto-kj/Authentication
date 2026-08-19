@@ -11,14 +11,18 @@ using static OpenIddict.Abstractions.OpenIddictConstants;
 namespace Authentication.Infrastructure.Persistence;
 
 /// <summary>
-/// Applies pending migrations and seeds a demo tenant, OAuth client and user
-/// so the API is exercisable immediately after `docker compose up`. Runs
-/// only when explicitly invoked (see Program.cs) - never automatically in
-/// production, and it is idempotent so it is safe to run on every startup
-/// of a Development instance.
+/// Applies pending migrations and seeds a demo Tenant/Empresa/TenantRole/
+/// Vinculo/Usuario so the API is exercisable immediately after
+/// `docker compose up`. Runs only when explicitly invoked (see Program.cs) -
+/// never automatically in production, and it is idempotent so it is safe to
+/// run on every startup of a Development instance.
 /// </summary>
 public static class DbSeeder
 {
+    // A commonly used, digits-valid-format demo CPF (passes the standard
+    // check-digit algorithm) - not a real person's document.
+    private const string DemoUserCpf = "52998224725";
+
     public static async Task SeedAsync(IServiceProvider services)
     {
         var context = services.GetRequiredService<ApplicationDbContext>();
@@ -50,6 +54,59 @@ public static class DbSeeder
             context.Tenants.Add(tenant);
             await context.SaveChangesAsync(default);
             logger.LogInformation("Seeded demo tenant {TenantId}", tenant.Id);
+        }
+
+        var empresa = await context.Empresas.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(e => e.TenantId == tenant.Id && e.Cnpj == "00000000000191");
+        if (empresa is null)
+        {
+            empresa = new Empresa
+            {
+                TenantId = tenant.Id,
+                RazaoSocial = "Demo Empresa Matriz",
+                Cnpj = "00000000000191",
+                Status = EmpresaStatus.Ativa,
+                CreatedAtUtc = DateTimeOffset.UtcNow
+            };
+            context.Empresas.Add(empresa);
+            await context.SaveChangesAsync(default);
+            logger.LogInformation("Seeded demo empresa {EmpresaId} for tenant {TenantId}", empresa.Id, tenant.Id);
+        }
+
+        var permission = await context.Permissions.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(p => p.Chave == "produtos:gerenciar");
+        if (permission is null)
+        {
+            permission = new Permission
+            {
+                Chave = "produtos:gerenciar",
+                Descricao = "Criar, editar e remover produtos",
+                CreatedAtUtc = DateTimeOffset.UtcNow
+            };
+            context.Permissions.Add(permission);
+            await context.SaveChangesAsync(default);
+        }
+
+        var adminRole = await context.TenantRoles.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(r => r.TenantId == tenant.Id && r.Nome == "admin");
+        if (adminRole is null)
+        {
+            adminRole = new TenantRole
+            {
+                TenantId = tenant.Id,
+                Nome = "admin",
+                CreatedAtUtc = DateTimeOffset.UtcNow
+            };
+            context.TenantRoles.Add(adminRole);
+            await context.SaveChangesAsync(default);
+
+            context.TenantRolePermissions.Add(new TenantRolePermission
+            {
+                TenantRoleId = adminRole.Id,
+                PermissionId = permission.Id
+            });
+            await context.SaveChangesAsync(default);
+            logger.LogInformation("Seeded demo tenant role {RoleId} (admin) for tenant {TenantId}", adminRole.Id, tenant.Id);
         }
 
         var applicationManager = services.GetRequiredService<IOpenIddictApplicationManager>();
@@ -97,28 +154,50 @@ public static class DbSeeder
         }
 
         var userManager = services.GetRequiredService<UserManager<ApplicationUser>>();
-        if (await userManager.FindByNameAsync("demo@demo-tenant.local") is null)
+        var user = await userManager.FindByNameAsync(DemoUserCpf);
+        if (user is null)
         {
-            var user = new ApplicationUser
+            user = new ApplicationUser
             {
-                UserName = "demo@demo-tenant.local",
+                UserName = DemoUserCpf,
                 Email = "demo@demo-tenant.local",
                 EmailConfirmed = true,
-                TenantId = tenant.Id,
-                DisplayName = "Demo User",
+                NomePrimeiro = "Demo",
+                NomeUltimo = "User",
                 IsActive = true
             };
 
             var result = await userManager.CreateAsync(user, "ChangeMe!2026#Secure");
-            if (result.Succeeded)
-            {
-                logger.LogInformation("Seeded demo user for tenant {TenantId}", tenant.Id);
-            }
-            else
+            if (!result.Succeeded)
             {
                 logger.LogWarning("Failed to seed demo user: {Errors}",
                     string.Join(", ", result.Errors.Select(e => e.Description)));
+                return;
             }
+
+            logger.LogInformation("Seeded demo usuario {UserId} (CPF login)", user.Id);
+        }
+
+        var vinculo = await context.Vinculos
+            .FirstOrDefaultAsync(v => v.UsuarioId == user.Id && v.TenantId == tenant.Id);
+        if (vinculo is null)
+        {
+            vinculo = new Vinculo
+            {
+                UsuarioId = user.Id,
+                TenantId = tenant.Id,
+                TenantRoleId = adminRole.Id,
+                Status = VinculoStatus.Ativo,
+                CreatedAtUtc = DateTimeOffset.UtcNow
+            };
+            context.Vinculos.Add(vinculo);
+            await context.SaveChangesAsync(default);
+
+            context.VinculoEmpresas.Add(new VinculoEmpresa { VinculoId = vinculo.Id, EmpresaId = empresa.Id });
+            await context.SaveChangesAsync(default);
+
+            logger.LogInformation(
+                "Seeded demo vinculo linking usuario {UserId} to tenant {TenantId} as admin", user.Id, tenant.Id);
         }
     }
 }

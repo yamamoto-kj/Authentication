@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using System.Security.Claims;
+using Authentication.Application.Common.Interfaces;
+using Authentication.Domain.Enums;
 using Authentication.Infrastructure.Identity;
 using Authentication.Infrastructure.MultiTenancy;
 using Authentication.Api.Extensions;
@@ -8,6 +10,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using OpenIddict.Abstractions;
 using OpenIddict.Server.AspNetCore;
@@ -27,6 +30,13 @@ namespace Authentication.Api.Controllers;
 ///  - refresh_token: rolling refresh, previous token revoked on use.
 /// The tenant_id claim is stamped into every token here and nowhere else,
 /// which is what makes it trustworthy for TenantProvider to read downstream.
+///
+/// PHASE 1 NOTE: the password grant below picks the user's *sole* active
+/// Vinculo and mints a full token directly. It intentionally does not yet
+/// implement the CPF-Global flow (selection token -> list of
+/// grupos/empresas -> POST /auth/select-context -> final token) - that is
+/// phase 3 of the multi-tenant plan. A user with zero or more than one
+/// active Vinculo is rejected for now rather than silently picking one.
 /// </summary>
 [ApiController]
 [Route("connect")]
@@ -36,17 +46,20 @@ public class AuthorizationController : ControllerBase
 {
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly SignInManager<ApplicationUser> _signInManager;
+    private readonly IApplicationDbContext _dbContext;
     private readonly IOpenIddictApplicationManager _applicationManager;
     private readonly IOpenIddictScopeManager _scopeManager;
 
     public AuthorizationController(
         UserManager<ApplicationUser> userManager,
         SignInManager<ApplicationUser> signInManager,
+        IApplicationDbContext dbContext,
         IOpenIddictApplicationManager applicationManager,
         IOpenIddictScopeManager scopeManager)
     {
         _userManager = userManager;
         _signInManager = signInManager;
+        _dbContext = dbContext;
         _applicationManager = applicationManager;
         _scopeManager = scopeManager;
     }
@@ -116,21 +129,54 @@ public class AuthorizationController : ControllerBase
 
     private async Task<IActionResult> HandlePasswordAsync(OpenIddictRequest request)
     {
+        // request.Username carries the CPF (digits only) - it IS the
+        // Identity UserName, see ApplicationUser's doc comment.
         var user = await _userManager.FindByNameAsync(request.Username!);
         if (user is null || !user.IsActive)
         {
-            return Forbidden(Errors.InvalidGrant, "The username/password combination is invalid.");
+            return Forbidden(Errors.InvalidGrant, "CPF/senha inválidos.");
         }
 
         // Uses Identity's lockout-aware password check so brute-force
         // attempts trip the same account lockout as the normal login path.
+        // TwoFactorRequired users get SignInResult.RequiresTwoFactor here -
+        // treated as a plain failure for now; the 2FA gate is phase 4.
         var result = await _signInManager.CheckPasswordSignInAsync(user, request.Password!, lockoutOnFailure: true);
         if (!result.Succeeded)
         {
-            return Forbidden(Errors.InvalidGrant, "The username/password combination is invalid.");
+            return Forbidden(Errors.InvalidGrant, "CPF/senha inválidos.");
         }
 
-        var identity = await BuildUserIdentityAsync(user);
+        // Cross-tenant by design: no tenant is resolved yet at this point in
+        // the flow, so the standard Vinculo query filter is bypassed
+        // explicitly and deliberately (see ApplicationDbContext's comment on
+        // why Vinculo carries no tenant filter at all).
+        var vinculosAtivos = await _dbContext.Vinculos
+            .Where(v => v.UsuarioId == user.Id && v.Status == VinculoStatus.Ativo)
+            .ToListAsync();
+
+        if (vinculosAtivos.Count == 0)
+        {
+            return Forbidden(Errors.InvalidGrant, "Usuário sem acesso a nenhum grupo econômico.");
+        }
+
+        if (vinculosAtivos.Count > 1)
+        {
+            // TODO(fase 3): emitir token de seleção + listar grupos/empresas
+            // em vez de rejeitar.
+            return Forbidden(Errors.InvalidGrant,
+                "Usuário possui múltiplos grupos econômicos - seleção de contexto ainda não implementada.");
+        }
+
+        var vinculo = vinculosAtivos[0];
+        // IgnoreQueryFilters: no tenant is resolved on this DbContext yet
+        // (we are still building the very first token for this request), so
+        // the standard TenantRole filter would exclude every row. Safe here
+        // because vinculo.TenantRoleId was already read from a Vinculo whose
+        // TenantId we trust explicitly.
+        var role = await _dbContext.TenantRoles.IgnoreQueryFilters().FirstAsync(r => r.Id == vinculo.TenantRoleId);
+
+        var identity = BuildUserIdentity(user, vinculo.TenantId, role.Nome);
 
         identity.SetScopes(request.GetScopes());
         identity.SetResources(await _scopeManager.ListResourcesAsync(identity.GetScopes()).ToListAsync());
@@ -146,16 +192,36 @@ public class AuthorizationController : ControllerBase
             ?? throw new InvalidOperationException("The refresh token principal cannot be retrieved.");
 
         var userId = principal.GetClaim(Claims.Subject);
+        var tenantIdClaim = principal.GetClaim(TenantClaimTypes.TenantId);
+
         var user = userId is not null ? await _userManager.FindByIdAsync(userId) : null;
 
-        if (user is null || !user.IsActive)
+        if (user is null || !user.IsActive || tenantIdClaim is null || !Guid.TryParse(tenantIdClaim, out var tenantId))
         {
             // Revoke: the user was deleted/deactivated since the refresh
             // token was issued - do not let a stale token keep working.
             return Forbidden(Errors.InvalidGrant, "The token is no longer valid.");
         }
 
-        var identity = await BuildUserIdentityAsync(user);
+        // Re-verify the membership is still active on every refresh (not
+        // just at original login) - a suspended Vinculo must invalidate
+        // in-flight refresh tokens for that tenant, not just new logins.
+        var vinculo = await _dbContext.Vinculos.FirstOrDefaultAsync(
+            v => v.UsuarioId == user.Id && v.TenantId == tenantId && v.Status == VinculoStatus.Ativo);
+
+        if (vinculo is null)
+        {
+            return Forbidden(Errors.InvalidGrant, "The token is no longer valid.");
+        }
+
+        // IgnoreQueryFilters: no tenant is resolved on this DbContext yet
+        // (we are still building the very first token for this request), so
+        // the standard TenantRole filter would exclude every row. Safe here
+        // because vinculo.TenantRoleId was already read from a Vinculo whose
+        // TenantId we trust explicitly.
+        var role = await _dbContext.TenantRoles.IgnoreQueryFilters().FirstAsync(r => r.Id == vinculo.TenantRoleId);
+
+        var identity = BuildUserIdentity(user, tenantId, role.Nome);
         identity.SetScopes(principal.GetScopes());
         identity.SetResources(await _scopeManager.ListResourcesAsync(identity.GetScopes()).ToListAsync());
         identity.SetDestinations(GetDestinations);
@@ -163,7 +229,7 @@ public class AuthorizationController : ControllerBase
         return SignIn(new ClaimsPrincipal(identity), OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
     }
 
-    private async Task<ClaimsIdentity> BuildUserIdentityAsync(ApplicationUser user)
+    private static ClaimsIdentity BuildUserIdentity(ApplicationUser user, Guid tenantId, string roleName)
     {
         var identity = new ClaimsIdentity(
             authenticationType: TokenValidationParameters.DefaultAuthenticationType,
@@ -171,12 +237,10 @@ public class AuthorizationController : ControllerBase
             roleType: Claims.Role);
 
         identity.SetClaim(Claims.Subject, user.Id.ToString());
-        identity.SetClaim(Claims.Name, user.UserName);
+        identity.SetClaim(Claims.Name, $"{user.NomePrimeiro} {user.NomeUltimo}");
         identity.SetClaim(Claims.Email, user.Email);
-        identity.SetClaim(TenantClaimTypes.TenantId, user.TenantId.ToString());
-
-        var roles = await _userManager.GetRolesAsync(user);
-        identity.SetClaims(Claims.Role, roles.ToImmutableArray());
+        identity.SetClaim(TenantClaimTypes.TenantId, tenantId.ToString());
+        identity.SetClaims(Claims.Role, ImmutableArray.Create(roleName));
 
         return identity;
     }

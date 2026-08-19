@@ -30,6 +30,18 @@ public class ApplicationDbContext
 
     public DbSet<Product> Products => Set<Product>();
 
+    public DbSet<Empresa> Empresas => Set<Empresa>();
+
+    public DbSet<Vinculo> Vinculos => Set<Vinculo>();
+
+    public DbSet<VinculoEmpresa> VinculoEmpresas => Set<VinculoEmpresa>();
+
+    public DbSet<TenantRole> TenantRoles => Set<TenantRole>();
+
+    public DbSet<Permission> Permissions => Set<Permission>();
+
+    public DbSet<TenantRolePermission> TenantRolePermissions => Set<TenantRolePermission>();
+
     /// <summary>
     /// Read by the query filters below via an implicit "this." instance
     /// access, which EF Core specifically recognizes and re-evaluates for
@@ -51,6 +63,18 @@ public class ApplicationDbContext
 
         builder.Entity<Product>().HasQueryFilter(p => !p.IsDeleted && p.TenantId == CurrentTenantId);
         builder.Entity<Tenant>().HasQueryFilter(t => !t.IsDeleted);
+        builder.Entity<Empresa>().HasQueryFilter(e => !e.IsDeleted && e.TenantId == CurrentTenantId);
+        builder.Entity<TenantRole>().HasQueryFilter(r => !r.IsDeleted && r.TenantId == CurrentTenantId);
+        builder.Entity<Permission>().HasQueryFilter(p => !p.IsDeleted);
+
+        // Vinculo intentionally has NO tenant query filter: the login flow
+        // must look up a user's memberships *across every tenant* before any
+        // tenant is resolved (see AuthorizationController). Every other read
+        // of Vinculo happens already scoped by an explicit TenantId/UsuarioId
+        // predicate at the call site, so the absence of a filter here is a
+        // deliberate exception, not an oversight - do not "fix" it by adding
+        // one back without re-checking the login flow.
+        builder.Entity<Vinculo>().HasQueryFilter(v => !v.IsDeleted);
     }
 
     public new EntityEntry<TEntity> Entry<TEntity>(TEntity entity) where TEntity : class
