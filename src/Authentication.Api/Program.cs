@@ -1,6 +1,7 @@
 using Authentication.Api.Extensions;
 using Authentication.Api.Middleware;
 using Authentication.Application;
+using Authentication.Domain.Common;
 using Authentication.Infrastructure;
 using Authentication.Infrastructure.Identity;
 using Authentication.Infrastructure.MultiTenancy;
@@ -8,7 +9,6 @@ using Authentication.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
 using OpenIddict.Validation.AspNetCore;
 using Serilog;
-using static OpenIddict.Abstractions.OpenIddictConstants;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -60,13 +60,18 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy(PlatformRoles.PlatformAdmin, policy =>
         policy.RequireClaim(PlatformClaimTypes.PlatformRole, PlatformRoles.PlatformAdmin));
 
-    // Tenant-scoped: caller must be authenticated into a specific tenant
-    // (RequireTenant) AND hold the "admin" TenantRole *within that tenant*.
-    // Stopgap until phase 6 replaces this with real per-permission checks
-    // (e.g. "usuarios:convidar") read from the token's permissions claim.
-    options.AddPolicy("TenantAdmin", policy => policy
+    // Permission-scoped: caller must be in a specific tenant (RequireTenant)
+    // AND their TenantRole must grant the named Permission - read from the
+    // "permissions" claim resolved once at token-issuance time (see
+    // AuthorizationController.GetPermissionKeysAsync), not looked up
+    // per-request. One named policy per entry in PermissionKeys.
+    options.AddPolicy(PermissionKeys.ProdutosGerenciar, policy => policy
         .RequireClaim(TenantClaimTypes.TenantId)
-        .RequireClaim(Claims.Role, "admin"));
+        .RequireClaim(PermissionClaimTypes.Permission, PermissionKeys.ProdutosGerenciar));
+
+    options.AddPolicy(PermissionKeys.UsuariosConvidar, policy => policy
+        .RequireClaim(TenantClaimTypes.TenantId)
+        .RequireClaim(PermissionClaimTypes.Permission, PermissionKeys.UsuariosConvidar));
 });
 
 builder.Services.AddControllers();

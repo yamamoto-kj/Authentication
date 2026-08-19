@@ -12,17 +12,17 @@ using Microsoft.EntityFrameworkCore;
 namespace Authentication.Api.Controllers;
 
 /// <summary>
-/// Tenant-scoped membership management: an "admin" TenantRole holder in a
-/// given Grupo Econômico can grant an *already existing* Usuario (by CPF)
-/// access to their own tenant - unlike AdminUsuariosController, this never
-/// creates a brand-new global identity, only a new Vinculo. TenantId always
-/// comes from the caller's own token (ITenantProvider), never from the
-/// request body - a tenant admin can only ever invite people into their
-/// own tenant, not any other.
+/// Tenant-scoped membership management: whoever holds the
+/// "usuarios:convidar" permission in a given Grupo Econômico can grant an
+/// *already existing* Usuario (by CPF) access to their own tenant - unlike
+/// AdminUsuariosController, this never creates a brand-new global identity,
+/// only a new Vinculo. TenantId always comes from the caller's own token
+/// (ITenantProvider), never from the request body - whoever calls this can
+/// only ever invite people into their own tenant, not any other.
 /// </summary>
 [ApiController]
 [Route("admin/vinculos")]
-[Authorize(Policy = "TenantAdmin")]
+[Authorize(Policy = PermissionKeys.UsuariosConvidar)]
 public class VinculosController : ControllerBase
 {
     private readonly UserManager<ApplicationUser> _userManager;

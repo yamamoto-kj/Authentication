@@ -11,6 +11,18 @@ public static class TenantClaimTypes
     public const string EmpresaId = "empresa_id";
 }
 
+public static class PermissionClaimTypes
+{
+    /// <summary>
+    /// Multi-valued claim: every Permission.Chave the caller's TenantRole
+    /// grants in the token's tenant, resolved once at token-issuance time
+    /// (not looked up per-request) - see AuthorizationController. A role's
+    /// permissions changing takes effect on that user's next token refresh,
+    /// same as a role rename would.
+    /// </summary>
+    public const string Permission = "permissions";
+}
+
 /// <summary>
 /// Marks a token as an intermediate "selection" credential (issued by the
 /// password grant when the user has one or more active Vinculo) rather

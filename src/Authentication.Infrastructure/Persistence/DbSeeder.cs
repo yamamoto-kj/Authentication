@@ -1,3 +1,4 @@
+using Authentication.Domain.Common;
 using Authentication.Domain.Entities;
 using Authentication.Domain.Enums;
 using Authentication.Infrastructure.Identity;
@@ -96,19 +97,10 @@ public static class DbSeeder
             logger.LogInformation("Seeded demo empresa filial {EmpresaId} for tenant {TenantId}", empresaFilial.Id, tenant.Id);
         }
 
-        var permission = await context.Permissions.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(p => p.Chave == "produtos:gerenciar");
-        if (permission is null)
-        {
-            permission = new Permission
-            {
-                Chave = "produtos:gerenciar",
-                Descricao = "Criar, editar e remover produtos",
-                CreatedAtUtc = DateTimeOffset.UtcNow
-            };
-            context.Permissions.Add(permission);
-            await context.SaveChangesAsync(default);
-        }
+        var produtosPermission = await GetOrCreatePermissionAsync(
+            context, PermissionKeys.ProdutosGerenciar, "Criar, editar e remover produtos");
+        var usuariosPermission = await GetOrCreatePermissionAsync(
+            context, PermissionKeys.UsuariosConvidar, "Convidar usuários já cadastrados para o grupo econômico");
 
         var adminRole = await context.TenantRoles.IgnoreQueryFilters()
             .FirstOrDefaultAsync(r => r.TenantId == tenant.Id && r.Nome == "admin");
@@ -123,10 +115,18 @@ public static class DbSeeder
             context.TenantRoles.Add(adminRole);
             await context.SaveChangesAsync(default);
 
+            // The demo "admin" role grants every seeded permission - a real
+            // tenant might create a narrower role (e.g. only produtosPermission)
+            // for an "operador" instead.
             context.TenantRolePermissions.Add(new TenantRolePermission
             {
                 TenantRoleId = adminRole.Id,
-                PermissionId = permission.Id
+                PermissionId = produtosPermission.Id
+            });
+            context.TenantRolePermissions.Add(new TenantRolePermission
+            {
+                TenantRoleId = adminRole.Id,
+                PermissionId = usuariosPermission.Id
             });
             await context.SaveChangesAsync(default);
             logger.LogInformation("Seeded demo tenant role {RoleId} (admin) for tenant {TenantId}", adminRole.Id, tenant.Id);
@@ -256,5 +256,26 @@ public static class DbSeeder
                     string.Join(", ", result.Errors.Select(e => e.Description)));
             }
         }
+    }
+
+    private static async Task<Permission> GetOrCreatePermissionAsync(
+        ApplicationDbContext context, string chave, string descricao)
+    {
+        var permission = await context.Permissions.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(p => p.Chave == chave);
+        if (permission is not null)
+        {
+            return permission;
+        }
+
+        permission = new Permission
+        {
+            Chave = chave,
+            Descricao = descricao,
+            CreatedAtUtc = DateTimeOffset.UtcNow
+        };
+        context.Permissions.Add(permission);
+        await context.SaveChangesAsync(default);
+        return permission;
     }
 }

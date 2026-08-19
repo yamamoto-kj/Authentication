@@ -2,6 +2,7 @@ using Authentication.Api.Extensions;
 using Authentication.Application.Products.Commands;
 using Authentication.Application.Products.Dtos;
 using Authentication.Application.Products.Queries;
+using Authentication.Domain.Common;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -13,7 +14,9 @@ namespace Authentication.Api.Controllers;
 /// Sample tenant-scoped resource. Every action is implicitly authenticated
 /// (global fallback policy) and additionally requires the "RequireTenant"
 /// policy, so a token without a tenant_id claim (which should never happen,
-/// but defense-in-depth) is rejected before reaching the handler.
+/// but defense-in-depth) is rejected before reaching the handler. Writes
+/// additionally require the "produtos:gerenciar" permission - reads do not,
+/// since any member of the tenant/empresa may look, not just managers.
 /// </summary>
 [ApiController]
 [Route("api/v1/products")]
@@ -45,6 +48,7 @@ public class ProductsController : ControllerBase
     }
 
     [HttpPost]
+    [Authorize(Policy = PermissionKeys.ProdutosGerenciar)]
     [ProducesResponseType(StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult> Create([FromBody] CreateProductCommand command, CancellationToken cancellationToken)
@@ -54,6 +58,7 @@ public class ProductsController : ControllerBase
     }
 
     [HttpPut("{id:guid}")]
+    [Authorize(Policy = PermissionKeys.ProdutosGerenciar)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
@@ -66,6 +71,7 @@ public class ProductsController : ControllerBase
     }
 
     [HttpDelete("{id:guid}")]
+    [Authorize(Policy = PermissionKeys.ProdutosGerenciar)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult> Delete(Guid id, CancellationToken cancellationToken)

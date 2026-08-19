@@ -180,7 +180,7 @@ public class AuthorizationController : ControllerBase
                 return Forbidden(Errors.InvalidGrant, "Usuário sem acesso a nenhum grupo econômico.");
             }
 
-            identity = BuildUserIdentity(user, tenantId: null, empresaId: null, roleName: null, isPlatformAdmin: true);
+            identity = BuildUserIdentity(user, tenantId: null, empresaId: null, roleName: null, permissions: ImmutableArray<string>.Empty, isPlatformAdmin: true);
             identity.SetScopes(request.GetScopes());
         }
         else
@@ -265,9 +265,10 @@ public class AuthorizationController : ControllerBase
         }
 
         var role = await _dbContext.TenantRoles.IgnoreQueryFilters().FirstAsync(r => r.Id == vinculo.TenantRoleId);
+        var permissions = await GetPermissionKeysAsync(role.Id);
         var isPlatformAdmin = await _userManager.IsInRoleAsync(user, PlatformRoles.PlatformAdmin);
 
-        var identity = BuildUserIdentity(user, tenantId, empresaId, role.Nome, isPlatformAdmin);
+        var identity = BuildUserIdentity(user, tenantId, empresaId, role.Nome, permissions, isPlatformAdmin);
         identity.SetScopes(ImmutableArray.Create(Scopes.OfflineAccess, "api"));
         identity.SetResources(await _scopeManager.ListResourcesAsync(identity.GetScopes()).ToListAsync());
         identity.SetDestinations(GetDestinations);
@@ -307,7 +308,7 @@ public class AuthorizationController : ControllerBase
                 return Forbidden(Errors.InvalidGrant, "The token is no longer valid.");
             }
 
-            identity = BuildUserIdentity(user, tenantId: null, empresaId: null, roleName: null, isPlatformAdmin: true);
+            identity = BuildUserIdentity(user, tenantId: null, empresaId: null, roleName: null, permissions: ImmutableArray<string>.Empty, isPlatformAdmin: true);
         }
         else
         {
@@ -342,8 +343,9 @@ public class AuthorizationController : ControllerBase
             // every row. Safe here because vinculo.TenantRoleId was already
             // read from a Vinculo whose TenantId we trust explicitly.
             var role = await _dbContext.TenantRoles.IgnoreQueryFilters().FirstAsync(r => r.Id == vinculo.TenantRoleId);
+            var permissions = await GetPermissionKeysAsync(role.Id);
 
-            identity = BuildUserIdentity(user, tenantId, empresaId, role.Nome, isPlatformAdmin);
+            identity = BuildUserIdentity(user, tenantId, empresaId, role.Nome, permissions, isPlatformAdmin);
         }
 
         identity.SetScopes(principal.GetScopes());
@@ -353,8 +355,20 @@ public class AuthorizationController : ControllerBase
         return SignIn(new ClaimsPrincipal(identity), OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
     }
 
+    /// <summary>IgnoreQueryFilters: same reasoning as every other lookup keyed off an already-trusted TenantRoleId in this file.</summary>
+    private async Task<ImmutableArray<string>> GetPermissionKeysAsync(Guid tenantRoleId)
+    {
+        var keys = await _dbContext.TenantRolePermissions.IgnoreQueryFilters()
+            .Where(rp => rp.TenantRoleId == tenantRoleId)
+            .Join(_dbContext.Permissions.IgnoreQueryFilters(), rp => rp.PermissionId, p => p.Id, (rp, p) => p.Chave)
+            .ToListAsync();
+
+        return keys.ToImmutableArray();
+    }
+
     private static ClaimsIdentity BuildUserIdentity(
-        ApplicationUser user, Guid? tenantId, Guid? empresaId, string? roleName, bool isPlatformAdmin)
+        ApplicationUser user, Guid? tenantId, Guid? empresaId, string? roleName,
+        ImmutableArray<string> permissions, bool isPlatformAdmin)
     {
         var identity = new ClaimsIdentity(
             authenticationType: TokenValidationParameters.DefaultAuthenticationType,
@@ -370,6 +384,7 @@ public class AuthorizationController : ControllerBase
             identity.SetClaim(TenantClaimTypes.TenantId, tenantId.Value.ToString());
             identity.SetClaim(TenantClaimTypes.EmpresaId, empresaId!.Value.ToString());
             identity.SetClaims(Claims.Role, ImmutableArray.Create(roleName!));
+            identity.SetClaims(PermissionClaimTypes.Permission, permissions);
         }
 
         if (isPlatformAdmin)
