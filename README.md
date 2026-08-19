@@ -160,9 +160,10 @@ nome de outra pessoa).
 
 ## Segurança
 
-- Senhas: bcrypt via ASP.NET Core Identity, política mínima de 12
-  caracteres com maiúscula/minúscula/dígito/símbolo, lockout após 5
-  tentativas.
+- Senhas: hash via `PasswordHasher` padrão do ASP.NET Core Identity
+  (PBKDF2-HMAC-SHA256, 100.000 iterações, salt de 128 bits por senha,
+  formato versionado — não bcrypt). Política mínima de 12 caracteres com
+  maiúscula/minúscula/dígito/símbolo, lockout após 5 tentativas.
 - Cada requisição passa por: rate limiting → autenticação → autorização →
   handler. Falha em qualquer etapa nunca revela detalhes internos —
   `GlobalExceptionHandler` mapeia exceções para RFC 7807 (`ProblemDetails`)
