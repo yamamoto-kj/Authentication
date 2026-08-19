@@ -19,9 +19,10 @@ namespace Authentication.Infrastructure.Persistence;
 /// </summary>
 public static class DbSeeder
 {
-    // A commonly used, digits-valid-format demo CPF (passes the standard
-    // check-digit algorithm) - not a real person's document.
+    // Commonly used, digits-valid-format demo CPFs (pass the standard
+    // check-digit algorithm) - not real people's documents.
     private const string DemoUserCpf = "52998224725";
+    private const string PlatformAdminCpf = "11144477735";
 
     public static async Task SeedAsync(IServiceProvider services)
     {
@@ -198,6 +199,38 @@ public static class DbSeeder
 
             logger.LogInformation(
                 "Seeded demo vinculo linking usuario {UserId} to tenant {TenantId} as admin", user.Id, tenant.Id);
+        }
+
+        var roleManager = services.GetRequiredService<RoleManager<ApplicationRole>>();
+        if (await roleManager.FindByNameAsync(PlatformRoles.PlatformAdmin) is null)
+        {
+            await roleManager.CreateAsync(new ApplicationRole(PlatformRoles.PlatformAdmin));
+        }
+
+        var platformAdmin = await userManager.FindByNameAsync(PlatformAdminCpf);
+        if (platformAdmin is null)
+        {
+            platformAdmin = new ApplicationUser
+            {
+                UserName = PlatformAdminCpf,
+                Email = "platform-admin@demo-tenant.local",
+                EmailConfirmed = true,
+                NomePrimeiro = "Plataforma",
+                NomeUltimo = "Admin",
+                IsActive = true
+            };
+
+            var result = await userManager.CreateAsync(platformAdmin, "ChangeMe!2026#PlatformAdmin");
+            if (result.Succeeded)
+            {
+                await userManager.AddToRoleAsync(platformAdmin, PlatformRoles.PlatformAdmin);
+                logger.LogInformation("Seeded platform admin usuario {UserId} (no Vinculo - global scope)", platformAdmin.Id);
+            }
+            else
+            {
+                logger.LogWarning("Failed to seed platform admin: {Errors}",
+                    string.Join(", ", result.Errors.Select(e => e.Description)));
+            }
         }
     }
 }

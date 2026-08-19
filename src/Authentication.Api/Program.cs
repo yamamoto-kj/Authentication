@@ -2,11 +2,13 @@ using Authentication.Api.Extensions;
 using Authentication.Api.Middleware;
 using Authentication.Application;
 using Authentication.Infrastructure;
+using Authentication.Infrastructure.Identity;
 using Authentication.Infrastructure.MultiTenancy;
 using Authentication.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
 using OpenIddict.Validation.AspNetCore;
 using Serilog;
+using static OpenIddict.Abstractions.OpenIddictConstants;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -39,6 +41,19 @@ builder.Services.AddAuthorization(options =>
         .Build();
 
     options.AddPolicy("RequireTenant", policy => policy.RequireClaim(TenantClaimTypes.TenantId));
+
+    // Platform-level: no tenant context, only used by cross-tenant admin
+    // operations (e.g. provisioning a brand-new Usuario).
+    options.AddPolicy(PlatformRoles.PlatformAdmin, policy =>
+        policy.RequireClaim(PlatformClaimTypes.PlatformRole, PlatformRoles.PlatformAdmin));
+
+    // Tenant-scoped: caller must be authenticated into a specific tenant
+    // (RequireTenant) AND hold the "admin" TenantRole *within that tenant*.
+    // Stopgap until phase 6 replaces this with real per-permission checks
+    // (e.g. "usuarios:convidar") read from the token's permissions claim.
+    options.AddPolicy("TenantAdmin", policy => policy
+        .RequireClaim(TenantClaimTypes.TenantId)
+        .RequireClaim(Claims.Role, "admin"));
 });
 
 builder.Services.AddControllers();

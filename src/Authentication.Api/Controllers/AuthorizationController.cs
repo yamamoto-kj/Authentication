@@ -147,6 +147,8 @@ public class AuthorizationController : ControllerBase
             return Forbidden(Errors.InvalidGrant, "CPF/senha inválidos.");
         }
 
+        var isPlatformAdmin = await _userManager.IsInRoleAsync(user, PlatformRoles.PlatformAdmin);
+
         // Cross-tenant by design: no tenant is resolved yet at this point in
         // the flow, so the standard Vinculo query filter is bypassed
         // explicitly and deliberately (see ApplicationDbContext's comment on
@@ -155,28 +157,40 @@ public class AuthorizationController : ControllerBase
             .Where(v => v.UsuarioId == user.Id && v.Status == VinculoStatus.Ativo)
             .ToListAsync();
 
+        ClaimsIdentity identity;
+
         if (vinculosAtivos.Count == 0)
         {
-            return Forbidden(Errors.InvalidGrant, "Usuário sem acesso a nenhum grupo econômico.");
-        }
+            // A platform admin manages global concerns (e.g. provisioning
+            // other users) that have no tenant context, so they are allowed
+            // to hold zero Vinculo and still log in - everyone else with no
+            // membership anywhere has nothing this API can do for them.
+            if (!isPlatformAdmin)
+            {
+                return Forbidden(Errors.InvalidGrant, "Usuário sem acesso a nenhum grupo econômico.");
+            }
 
-        if (vinculosAtivos.Count > 1)
+            identity = BuildUserIdentity(user, tenantId: null, roleName: null, isPlatformAdmin: true);
+        }
+        else if (vinculosAtivos.Count > 1)
         {
             // TODO(fase 3): emitir token de seleção + listar grupos/empresas
             // em vez de rejeitar.
             return Forbidden(Errors.InvalidGrant,
                 "Usuário possui múltiplos grupos econômicos - seleção de contexto ainda não implementada.");
         }
+        else
+        {
+            var vinculo = vinculosAtivos[0];
+            // IgnoreQueryFilters: no tenant is resolved on this DbContext yet
+            // (we are still building the very first token for this
+            // request), so the standard TenantRole filter would exclude
+            // every row. Safe here because vinculo.TenantRoleId was already
+            // read from a Vinculo whose TenantId we trust explicitly.
+            var role = await _dbContext.TenantRoles.IgnoreQueryFilters().FirstAsync(r => r.Id == vinculo.TenantRoleId);
 
-        var vinculo = vinculosAtivos[0];
-        // IgnoreQueryFilters: no tenant is resolved on this DbContext yet
-        // (we are still building the very first token for this request), so
-        // the standard TenantRole filter would exclude every row. Safe here
-        // because vinculo.TenantRoleId was already read from a Vinculo whose
-        // TenantId we trust explicitly.
-        var role = await _dbContext.TenantRoles.IgnoreQueryFilters().FirstAsync(r => r.Id == vinculo.TenantRoleId);
-
-        var identity = BuildUserIdentity(user, vinculo.TenantId, role.Nome);
+            identity = BuildUserIdentity(user, vinculo.TenantId, role.Nome, isPlatformAdmin);
+        }
 
         identity.SetScopes(request.GetScopes());
         identity.SetResources(await _scopeManager.ListResourcesAsync(identity.GetScopes()).ToListAsync());
@@ -196,32 +210,56 @@ public class AuthorizationController : ControllerBase
 
         var user = userId is not null ? await _userManager.FindByIdAsync(userId) : null;
 
-        if (user is null || !user.IsActive || tenantIdClaim is null || !Guid.TryParse(tenantIdClaim, out var tenantId))
+        if (user is null || !user.IsActive)
         {
             // Revoke: the user was deleted/deactivated since the refresh
             // token was issued - do not let a stale token keep working.
             return Forbidden(Errors.InvalidGrant, "The token is no longer valid.");
         }
 
-        // Re-verify the membership is still active on every refresh (not
-        // just at original login) - a suspended Vinculo must invalidate
-        // in-flight refresh tokens for that tenant, not just new logins.
-        var vinculo = await _dbContext.Vinculos.FirstOrDefaultAsync(
-            v => v.UsuarioId == user.Id && v.TenantId == tenantId && v.Status == VinculoStatus.Ativo);
+        var isPlatformAdmin = await _userManager.IsInRoleAsync(user, PlatformRoles.PlatformAdmin);
 
-        if (vinculo is null)
+        ClaimsIdentity identity;
+
+        if (tenantIdClaim is null)
         {
-            return Forbidden(Errors.InvalidGrant, "The token is no longer valid.");
+            // The original token had no tenant (platform-admin login) -
+            // re-verify the role wasn't revoked since then before reissuing.
+            if (!isPlatformAdmin)
+            {
+                return Forbidden(Errors.InvalidGrant, "The token is no longer valid.");
+            }
+
+            identity = BuildUserIdentity(user, tenantId: null, roleName: null, isPlatformAdmin: true);
+        }
+        else
+        {
+            if (!Guid.TryParse(tenantIdClaim, out var tenantId))
+            {
+                return Forbidden(Errors.InvalidGrant, "The token is no longer valid.");
+            }
+
+            // Re-verify the membership is still active on every refresh (not
+            // just at original login) - a suspended Vinculo must invalidate
+            // in-flight refresh tokens for that tenant, not just new logins.
+            var vinculo = await _dbContext.Vinculos.FirstOrDefaultAsync(
+                v => v.UsuarioId == user.Id && v.TenantId == tenantId && v.Status == VinculoStatus.Ativo);
+
+            if (vinculo is null)
+            {
+                return Forbidden(Errors.InvalidGrant, "The token is no longer valid.");
+            }
+
+            // IgnoreQueryFilters: no tenant is resolved on this DbContext yet
+            // (we are still building the very first token for this
+            // request), so the standard TenantRole filter would exclude
+            // every row. Safe here because vinculo.TenantRoleId was already
+            // read from a Vinculo whose TenantId we trust explicitly.
+            var role = await _dbContext.TenantRoles.IgnoreQueryFilters().FirstAsync(r => r.Id == vinculo.TenantRoleId);
+
+            identity = BuildUserIdentity(user, tenantId, role.Nome, isPlatformAdmin);
         }
 
-        // IgnoreQueryFilters: no tenant is resolved on this DbContext yet
-        // (we are still building the very first token for this request), so
-        // the standard TenantRole filter would exclude every row. Safe here
-        // because vinculo.TenantRoleId was already read from a Vinculo whose
-        // TenantId we trust explicitly.
-        var role = await _dbContext.TenantRoles.IgnoreQueryFilters().FirstAsync(r => r.Id == vinculo.TenantRoleId);
-
-        var identity = BuildUserIdentity(user, tenantId, role.Nome);
         identity.SetScopes(principal.GetScopes());
         identity.SetResources(await _scopeManager.ListResourcesAsync(identity.GetScopes()).ToListAsync());
         identity.SetDestinations(GetDestinations);
@@ -229,7 +267,8 @@ public class AuthorizationController : ControllerBase
         return SignIn(new ClaimsPrincipal(identity), OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
     }
 
-    private static ClaimsIdentity BuildUserIdentity(ApplicationUser user, Guid tenantId, string roleName)
+    private static ClaimsIdentity BuildUserIdentity(
+        ApplicationUser user, Guid? tenantId, string? roleName, bool isPlatformAdmin)
     {
         var identity = new ClaimsIdentity(
             authenticationType: TokenValidationParameters.DefaultAuthenticationType,
@@ -239,8 +278,17 @@ public class AuthorizationController : ControllerBase
         identity.SetClaim(Claims.Subject, user.Id.ToString());
         identity.SetClaim(Claims.Name, $"{user.NomePrimeiro} {user.NomeUltimo}");
         identity.SetClaim(Claims.Email, user.Email);
-        identity.SetClaim(TenantClaimTypes.TenantId, tenantId.ToString());
-        identity.SetClaims(Claims.Role, ImmutableArray.Create(roleName));
+
+        if (tenantId is not null)
+        {
+            identity.SetClaim(TenantClaimTypes.TenantId, tenantId.Value.ToString());
+            identity.SetClaims(Claims.Role, ImmutableArray.Create(roleName!));
+        }
+
+        if (isPlatformAdmin)
+        {
+            identity.SetClaim(PlatformClaimTypes.PlatformRole, PlatformRoles.PlatformAdmin);
+        }
 
         return identity;
     }
@@ -267,7 +315,7 @@ public class AuthorizationController : ControllerBase
                 yield return Destinations.IdentityToken;
                 yield break;
 
-            case TenantClaimTypes.TenantId or Claims.Role or Claims.Email:
+            case TenantClaimTypes.TenantId or Claims.Role or Claims.Email or PlatformClaimTypes.PlatformRole:
                 yield return Destinations.AccessToken;
                 yield break;
 
