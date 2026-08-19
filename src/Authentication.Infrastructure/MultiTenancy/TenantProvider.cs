@@ -6,6 +6,21 @@ namespace Authentication.Infrastructure.MultiTenancy;
 public static class TenantClaimTypes
 {
     public const string TenantId = "tenant_id";
+
+    /// <summary>Present on a final token alongside TenantId once phase 5 wires Empresa-level isolation.</summary>
+    public const string EmpresaId = "empresa_id";
+}
+
+/// <summary>
+/// Marks a token as an intermediate "selection" credential (issued by the
+/// password grant when the user has one or more active Vinculo) rather
+/// than a fully-scoped one - it carries no tenant_id/role/empresa_id and is
+/// only good for GET /auth/contexts and POST /auth/select-context.
+/// </summary>
+public static class SelectionClaimTypes
+{
+    public const string Purpose = "purpose";
+    public const string TenantSelectionPurpose = "tenant_selection";
 }
 
 /// <summary>

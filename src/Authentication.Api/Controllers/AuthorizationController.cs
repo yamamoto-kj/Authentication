@@ -23,20 +23,24 @@ using Microsoft.AspNetCore;
 namespace Authentication.Api.Controllers;
 
 /// <summary>
-/// OAuth2 token endpoint (RFC 6749). Supports:
-///  - client_credentials: service-to-service, tenant taken from the client application.
-///  - password: first-party trusted clients only (see README security notes -
-///    prefer Authorization Code + PKCE for anything with a browser/redirect).
-///  - refresh_token: rolling refresh, previous token revoked on use.
-/// The tenant_id claim is stamped into every token here and nowhere else,
-/// which is what makes it trustworthy for TenantProvider to read downstream.
+/// OAuth2 token endpoint (RFC 6749), listening on two registered URIs:
+///  - /connect/token: client_credentials, password, refresh_token.
+///  - /auth/select-context: the custom "tenant_selection" extension grant
+///    (RFC 6749 §4.5) that completes the CPF-Global login flow.
 ///
-/// PHASE 1 NOTE: the password grant below picks the user's *sole* active
-/// Vinculo and mints a full token directly. It intentionally does not yet
-/// implement the CPF-Global flow (selection token -> list of
-/// grupos/empresas -> POST /auth/select-context -> final token) - that is
-/// phase 3 of the multi-tenant plan. A user with zero or more than one
-/// active Vinculo is rejected for now rather than silently picking one.
+/// password grant behavior: CPF/senha alone never yields a fully-scoped
+/// token unless the user has zero Vinculo and is a PlatformAdmin. Anyone
+/// with one or more active Vinculo instead gets a short-lived *selection*
+/// token (see SelectionClaimTypes) good only for GET /auth/contexts and
+/// this controller's tenant_selection grant - even a single-tenant user
+/// goes through this so the client only ever needs one code path (it can
+/// auto-submit the sole option without prompting).
+///
+/// The tenant_id/empresa_id claims are stamped into a token in exactly one
+/// place (BuildUserIdentity, called only from the tenant_selection branch
+/// and the refresh-token branch) - never by the initial password grant -
+/// which is what makes them trustworthy for TenantProvider to read
+/// downstream.
 /// </summary>
 [ApiController]
 [Route("connect")]
@@ -65,6 +69,7 @@ public class AuthorizationController : ControllerBase
     }
 
     [HttpPost("token")]
+    [HttpPost("/auth/select-context")]
     [IgnoreAntiforgeryToken]
     [Produces("application/json")]
     public async Task<IActionResult> Exchange()
@@ -85,6 +90,11 @@ public class AuthorizationController : ControllerBase
         if (request.IsRefreshTokenGrantType())
         {
             return await HandleRefreshTokenAsync();
+        }
+
+        if (request.GrantType == CustomGrantTypes.TenantSelection)
+        {
+            return await HandleTenantSelectionAsync(request);
         }
 
         return Forbid(
@@ -170,29 +180,95 @@ public class AuthorizationController : ControllerBase
                 return Forbidden(Errors.InvalidGrant, "Usuário sem acesso a nenhum grupo econômico.");
             }
 
-            identity = BuildUserIdentity(user, tenantId: null, roleName: null, isPlatformAdmin: true);
-        }
-        else if (vinculosAtivos.Count > 1)
-        {
-            // TODO(fase 3): emitir token de seleção + listar grupos/empresas
-            // em vez de rejeitar.
-            return Forbidden(Errors.InvalidGrant,
-                "Usuário possui múltiplos grupos econômicos - seleção de contexto ainda não implementada.");
+            identity = BuildUserIdentity(user, tenantId: null, empresaId: null, roleName: null, isPlatformAdmin: true);
+            identity.SetScopes(request.GetScopes());
         }
         else
         {
-            var vinculo = vinculosAtivos[0];
-            // IgnoreQueryFilters: no tenant is resolved on this DbContext yet
-            // (we are still building the very first token for this
-            // request), so the standard TenantRole filter would exclude
-            // every row. Safe here because vinculo.TenantRoleId was already
-            // read from a Vinculo whose TenantId we trust explicitly.
-            var role = await _dbContext.TenantRoles.IgnoreQueryFilters().FirstAsync(r => r.Id == vinculo.TenantRoleId);
-
-            identity = BuildUserIdentity(user, vinculo.TenantId, role.Nome, isPlatformAdmin);
+            // One or many Vinculo: always a selection token, never a full
+            // one, directly from the password grant - see the class-level
+            // doc comment for why even the single-tenant case goes through
+            // this same path.
+            identity = BuildSelectionIdentity(user);
+            // No scopes granted here (and no refresh token as a result for
+            // most clients) - this token is only ever meant to be traded
+            // immediately for a full one via the tenant_selection grant.
         }
 
-        identity.SetScopes(request.GetScopes());
+        identity.SetResources(await _scopeManager.ListResourcesAsync(identity.GetScopes()).ToListAsync());
+        identity.SetDestinations(GetDestinations);
+
+        return SignIn(new ClaimsPrincipal(identity), OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
+    }
+
+    private async Task<IActionResult> HandleTenantSelectionAsync(OpenIddictRequest request)
+    {
+        // The selection token was presented as a normal Bearer credential
+        // on this very request - the validation handler (the API's default
+        // authentication scheme) already authenticated it into HttpContext.User
+        // before this action ran, exactly as it would for any other
+        // endpoint. AllowAnonymous on the controller only skips the
+        // *authorization* check, not authentication itself.
+        if (User.FindFirst(SelectionClaimTypes.Purpose)?.Value != SelectionClaimTypes.TenantSelectionPurpose)
+        {
+            return Forbidden(Errors.InvalidGrant, "Token de seleção ausente ou inválido.");
+        }
+
+        var userId = User.FindFirst(Claims.Subject)?.Value;
+        var user = userId is not null ? await _userManager.FindByIdAsync(userId) : null;
+        if (user is null || !user.IsActive)
+        {
+            return Forbidden(Errors.InvalidGrant, "Token de seleção ausente ou inválido.");
+        }
+
+        var tenantIdParam = request.GetParameter("tenant_id")?.ToString();
+        if (!Guid.TryParse(tenantIdParam, out var tenantId))
+        {
+            return Forbidden(Errors.InvalidRequest, "Parâmetro 'tenant_id' ausente ou inválido.");
+        }
+
+        // Cross-tenant by design, same reasoning as in HandlePasswordAsync:
+        // no tenant is resolved on this DbContext yet.
+        var vinculo = await _dbContext.Vinculos.FirstOrDefaultAsync(
+            v => v.UsuarioId == user.Id && v.TenantId == tenantId && v.Status == VinculoStatus.Ativo);
+        if (vinculo is null)
+        {
+            return Forbidden(Errors.InvalidGrant, "Usuário não possui vínculo ativo com o grupo econômico informado.");
+        }
+
+        // IgnoreQueryFilters: see the identical comment in HandlePasswordAsync.
+        var empresaIds = await _dbContext.VinculoEmpresas.IgnoreQueryFilters()
+            .Where(ve => ve.VinculoId == vinculo.Id)
+            .Select(ve => ve.EmpresaId)
+            .ToListAsync();
+
+        var empresaIdParam = request.GetParameter("empresa_id")?.ToString();
+        Guid empresaId;
+
+        if (!string.IsNullOrEmpty(empresaIdParam))
+        {
+            if (!Guid.TryParse(empresaIdParam, out empresaId) || !empresaIds.Contains(empresaId))
+            {
+                return Forbidden(Errors.InvalidRequest, "Empresa informada não pertence a este vínculo.");
+            }
+        }
+        else if (empresaIds.Count == 1)
+        {
+            empresaId = empresaIds[0];
+        }
+        else
+        {
+            // Zero empresas would mean the Vinculo was provisioned wrong
+            // (VinculoEmpresa requires at least one row) - and more than
+            // one requires the client to ask the user which one.
+            return Forbidden(Errors.InvalidRequest, "Parâmetro 'empresa_id' é obrigatório para este grupo econômico.");
+        }
+
+        var role = await _dbContext.TenantRoles.IgnoreQueryFilters().FirstAsync(r => r.Id == vinculo.TenantRoleId);
+        var isPlatformAdmin = await _userManager.IsInRoleAsync(user, PlatformRoles.PlatformAdmin);
+
+        var identity = BuildUserIdentity(user, tenantId, empresaId, role.Nome, isPlatformAdmin);
+        identity.SetScopes(ImmutableArray.Create(Scopes.OfflineAccess, "api"));
         identity.SetResources(await _scopeManager.ListResourcesAsync(identity.GetScopes()).ToListAsync());
         identity.SetDestinations(GetDestinations);
 
@@ -207,6 +283,7 @@ public class AuthorizationController : ControllerBase
 
         var userId = principal.GetClaim(Claims.Subject);
         var tenantIdClaim = principal.GetClaim(TenantClaimTypes.TenantId);
+        var empresaIdClaim = principal.GetClaim(TenantClaimTypes.EmpresaId);
 
         var user = userId is not null ? await _userManager.FindByIdAsync(userId) : null;
 
@@ -230,11 +307,11 @@ public class AuthorizationController : ControllerBase
                 return Forbidden(Errors.InvalidGrant, "The token is no longer valid.");
             }
 
-            identity = BuildUserIdentity(user, tenantId: null, roleName: null, isPlatformAdmin: true);
+            identity = BuildUserIdentity(user, tenantId: null, empresaId: null, roleName: null, isPlatformAdmin: true);
         }
         else
         {
-            if (!Guid.TryParse(tenantIdClaim, out var tenantId))
+            if (!Guid.TryParse(tenantIdClaim, out var tenantId) || !Guid.TryParse(empresaIdClaim, out var empresaId))
             {
                 return Forbidden(Errors.InvalidGrant, "The token is no longer valid.");
             }
@@ -250,6 +327,15 @@ public class AuthorizationController : ControllerBase
                 return Forbidden(Errors.InvalidGrant, "The token is no longer valid.");
             }
 
+            // Re-verify the chosen Empresa is still granted to this Vinculo -
+            // an admin may have narrowed access since the original login.
+            var empresaAllowed = await _dbContext.VinculoEmpresas.IgnoreQueryFilters()
+                .AnyAsync(ve => ve.VinculoId == vinculo.Id && ve.EmpresaId == empresaId);
+            if (!empresaAllowed)
+            {
+                return Forbidden(Errors.InvalidGrant, "The token is no longer valid.");
+            }
+
             // IgnoreQueryFilters: no tenant is resolved on this DbContext yet
             // (we are still building the very first token for this
             // request), so the standard TenantRole filter would exclude
@@ -257,7 +343,7 @@ public class AuthorizationController : ControllerBase
             // read from a Vinculo whose TenantId we trust explicitly.
             var role = await _dbContext.TenantRoles.IgnoreQueryFilters().FirstAsync(r => r.Id == vinculo.TenantRoleId);
 
-            identity = BuildUserIdentity(user, tenantId, role.Nome, isPlatformAdmin);
+            identity = BuildUserIdentity(user, tenantId, empresaId, role.Nome, isPlatformAdmin);
         }
 
         identity.SetScopes(principal.GetScopes());
@@ -268,7 +354,7 @@ public class AuthorizationController : ControllerBase
     }
 
     private static ClaimsIdentity BuildUserIdentity(
-        ApplicationUser user, Guid? tenantId, string? roleName, bool isPlatformAdmin)
+        ApplicationUser user, Guid? tenantId, Guid? empresaId, string? roleName, bool isPlatformAdmin)
     {
         var identity = new ClaimsIdentity(
             authenticationType: TokenValidationParameters.DefaultAuthenticationType,
@@ -282,6 +368,7 @@ public class AuthorizationController : ControllerBase
         if (tenantId is not null)
         {
             identity.SetClaim(TenantClaimTypes.TenantId, tenantId.Value.ToString());
+            identity.SetClaim(TenantClaimTypes.EmpresaId, empresaId!.Value.ToString());
             identity.SetClaims(Claims.Role, ImmutableArray.Create(roleName!));
         }
 
@@ -289,6 +376,25 @@ public class AuthorizationController : ControllerBase
         {
             identity.SetClaim(PlatformClaimTypes.PlatformRole, PlatformRoles.PlatformAdmin);
         }
+
+        return identity;
+    }
+
+    /// <summary>
+    /// Intermediate credential: identifies the user (Subject) and nothing
+    /// else - no tenant, no role, no empresa. Only ever meant to be handed
+    /// straight back to GET /auth/contexts or the tenant_selection grant.
+    /// </summary>
+    private static ClaimsIdentity BuildSelectionIdentity(ApplicationUser user)
+    {
+        var identity = new ClaimsIdentity(
+            authenticationType: TokenValidationParameters.DefaultAuthenticationType,
+            nameType: Claims.Name,
+            roleType: Claims.Role);
+
+        identity.SetClaim(Claims.Subject, user.Id.ToString());
+        identity.SetClaim(SelectionClaimTypes.Purpose, SelectionClaimTypes.TenantSelectionPurpose);
+        identity.SetScopes(ImmutableArray<string>.Empty);
 
         return identity;
     }

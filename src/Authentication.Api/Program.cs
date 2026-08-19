@@ -42,6 +42,13 @@ builder.Services.AddAuthorization(options =>
 
     options.AddPolicy("RequireTenant", policy => policy.RequireClaim(TenantClaimTypes.TenantId));
 
+    // Selection-scoped: intermediate token issued by the password grant
+    // when the user has one or more active Vinculo, before a specific
+    // tenant/empresa is chosen. Good for exactly two endpoints:
+    // GET /auth/contexts and POST /auth/select-context.
+    options.AddPolicy("TenantSelection", policy => policy
+        .RequireClaim(SelectionClaimTypes.Purpose, SelectionClaimTypes.TenantSelectionPurpose));
+
     // Platform-level: no tenant context, only used by cross-tenant admin
     // operations (e.g. provisioning a brand-new Usuario).
     options.AddPolicy(PlatformRoles.PlatformAdmin, policy =>

@@ -73,11 +73,17 @@ public static class DependencyInjection
             })
             .AddServer(options =>
             {
-                options.SetTokenEndpointUris("/connect/token");
+                // Two URIs, one token endpoint: /auth/select-context is the
+                // second step of the CPF-Global login flow (see
+                // AuthorizationController) - registering it here is what
+                // lets that action call SignIn() to mint a real,
+                // OpenIddict-tracked token instead of a hand-rolled one.
+                options.SetTokenEndpointUris("/connect/token", "/auth/select-context");
 
                 options.AllowClientCredentialsFlow();
                 options.AllowPasswordFlow();
                 options.AllowRefreshTokenFlow();
+                options.AllowCustomFlow(CustomGrantTypes.TenantSelection);
 
                 options.SetAccessTokenLifetime(TimeSpan.FromMinutes(15));
                 options.SetRefreshTokenLifetime(TimeSpan.FromDays(14));

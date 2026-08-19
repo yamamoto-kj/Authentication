@@ -1,6 +1,7 @@
 using Authentication.Domain.Entities;
 using Authentication.Domain.Enums;
 using Authentication.Infrastructure.Identity;
+using Authentication.Infrastructure.MultiTenancy;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -72,6 +73,27 @@ public static class DbSeeder
             context.Empresas.Add(empresa);
             await context.SaveChangesAsync(default);
             logger.LogInformation("Seeded demo empresa {EmpresaId} for tenant {TenantId}", empresa.Id, tenant.Id);
+        }
+
+        // A second Empresa in the same tenant so the selection flow's
+        // "which empresa" step (POST /auth/select-context with an explicit
+        // empresa_id) is actually exercised in Development, not just the
+        // single-empresa auto-select path.
+        var empresaFilial = await context.Empresas.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(e => e.TenantId == tenant.Id && e.Cnpj == "00000000000272");
+        if (empresaFilial is null)
+        {
+            empresaFilial = new Empresa
+            {
+                TenantId = tenant.Id,
+                RazaoSocial = "Demo Empresa Filial",
+                Cnpj = "00000000000272",
+                Status = EmpresaStatus.Ativa,
+                CreatedAtUtc = DateTimeOffset.UtcNow
+            };
+            context.Empresas.Add(empresaFilial);
+            await context.SaveChangesAsync(default);
+            logger.LogInformation("Seeded demo empresa filial {EmpresaId} for tenant {TenantId}", empresaFilial.Id, tenant.Id);
         }
 
         var permission = await context.Permissions.IgnoreQueryFilters()
@@ -148,6 +170,7 @@ public static class DbSeeder
                     Permissions.Endpoints.Token,
                     Permissions.GrantTypes.Password,
                     Permissions.GrantTypes.RefreshToken,
+                    Permissions.Prefixes.GrantType + CustomGrantTypes.TenantSelection,
                     Permissions.Prefixes.Scope + "api"
                 }
             });
@@ -195,6 +218,7 @@ public static class DbSeeder
             await context.SaveChangesAsync(default);
 
             context.VinculoEmpresas.Add(new VinculoEmpresa { VinculoId = vinculo.Id, EmpresaId = empresa.Id });
+            context.VinculoEmpresas.Add(new VinculoEmpresa { VinculoId = vinculo.Id, EmpresaId = empresaFilial.Id });
             await context.SaveChangesAsync(default);
 
             logger.LogInformation(
