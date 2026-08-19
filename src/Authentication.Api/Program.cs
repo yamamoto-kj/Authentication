@@ -1,0 +1,130 @@
+using Authentication.Api.Extensions;
+using Authentication.Api.Middleware;
+using Authentication.Application;
+using Authentication.Infrastructure;
+using Authentication.Infrastructure.MultiTenancy;
+using Authentication.Infrastructure.Persistence;
+using Microsoft.AspNetCore.Authorization;
+using OpenIddict.Validation.AspNetCore;
+using Serilog;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// ---------------------------------------------------------------------
+// Logging: structured, environment-enriched, single sink of truth.
+// ---------------------------------------------------------------------
+builder.Host.UseSerilog((context, services, configuration) => configuration
+    .ReadFrom.Configuration(context.Configuration)
+    .ReadFrom.Services(services)
+    .Enrich.FromLogContext()
+    .Enrich.WithEnvironmentName()
+    .WriteTo.Console(outputTemplate:
+        "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}"));
+
+// ---------------------------------------------------------------------
+// Application services
+// ---------------------------------------------------------------------
+builder.Services.AddApplication();
+builder.Services.AddInfrastructure(builder.Configuration, builder.Environment);
+
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultScheme = OpenIddictValidationAspNetCoreDefaults.AuthenticationScheme;
+});
+
+builder.Services.AddAuthorization(options =>
+{
+    options.FallbackPolicy = new AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
+
+    options.AddPolicy("RequireTenant", policy => policy.RequireClaim(TenantClaimTypes.TenantId));
+});
+
+builder.Services.AddControllers();
+builder.Services.AddApiSwagger();
+builder.Services.AddApiRateLimiting(builder.Configuration);
+
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+builder.Services.AddProblemDetails();
+
+var redisConnectionString = builder.Configuration.GetConnectionString("Redis");
+if (!string.IsNullOrEmpty(redisConnectionString))
+{
+    builder.Services.AddStackExchangeRedisCache(options =>
+    {
+        options.Configuration = redisConnectionString;
+        options.InstanceName = "auth-api:";
+    });
+}
+else
+{
+    // Falls back to an in-process cache for local/dev single-instance runs;
+    // production must configure ConnectionStrings:Redis so idempotency and
+    // rate-limit state are shared across every instance behind the LB.
+    builder.Services.AddDistributedMemoryCache();
+}
+
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? Array.Empty<string>();
+        policy.WithOrigins(allowedOrigins)
+            .AllowAnyHeader()
+            .AllowAnyMethod();
+    });
+});
+
+builder.Services
+    .AddHealthChecks()
+    .AddNpgSql(builder.Configuration.GetConnectionString("Default") ?? string.Empty, name: "postgres", tags: new[] { "ready" });
+
+builder.Services.AddHttpClient("resilient")
+    .AddPolicyHandler((sp, _) => Authentication.Infrastructure.Resilience.ResiliencePolicies.Timeout())
+    .AddPolicyHandler((sp, _) => Authentication.Infrastructure.Resilience.ResiliencePolicies.RetryWithJitter(
+        sp.GetRequiredService<ILoggerFactory>().CreateLogger("HttpClient.Retry")))
+    .AddPolicyHandler((sp, _) => Authentication.Infrastructure.Resilience.ResiliencePolicies.CircuitBreaker(
+        sp.GetRequiredService<ILoggerFactory>().CreateLogger("HttpClient.CircuitBreaker")));
+
+var app = builder.Build();
+
+// ---------------------------------------------------------------------
+// Development-only conveniences
+// ---------------------------------------------------------------------
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+
+    using var scope = app.Services.CreateScope();
+    await DbSeeder.SeedAsync(scope.ServiceProvider);
+}
+else
+{
+    app.UseHsts();
+}
+
+// ---------------------------------------------------------------------
+// Middleware pipeline (order matters)
+// ---------------------------------------------------------------------
+app.UseExceptionHandler();
+app.UseSerilogRequestLogging();
+app.UseHttpsRedirection();
+app.UseMiddleware<SecurityHeadersMiddleware>();
+app.UseCors();
+app.UseRateLimiter();
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.UseMiddleware<IdempotencyMiddleware>();
+
+app.MapControllers();
+app.MapHealthChecks("/health/live").AllowAnonymous();
+app.MapHealthChecks("/health/ready").AllowAnonymous();
+
+app.Run();
+
+// Exposed for WebApplicationFactory-based integration tests.
+public partial class Program { }

@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: authentication
+      POSTGRES_USER: authentication_app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a strong POSTGRES_PASSWORD in your .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authentication_app -d authentication"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set a strong REDIS_PASSWORD in your .env}"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+  api:
+    build:
+      context: .
+      dockerfile: src/Authentication.Api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: "Host=postgres;Port=5432;Database=authentication;Username=authentication_app;Password=${POSTGRES_PASSWORD};SSL Mode=Prefer"
+      ConnectionStrings__Redis: "redis:6379,password=${REDIS_PASSWORD}"
+    ports:
+      - "8080:8080"
+    networks:
+      - internal
+    # Sessions/tokens/rate limits/idempotency all live in Postgres+Redis, not
+    # in-process, so this service can be scaled horizontally behind a load
+    # balancer or reverse proxy with no sticky sessions required, e.g.:
+    #   docker compose up --scale api=3 (behind an external LB, since a
+    #   fixed host port mapping can't be shared by multiple replicas here).
+
+networks:
+  internal:
+
+volumes:
+  postgres_data:
