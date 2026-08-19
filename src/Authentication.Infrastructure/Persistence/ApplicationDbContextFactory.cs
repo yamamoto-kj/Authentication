@@ -13,12 +13,18 @@ public class ApplicationDbContextFactory : IDesignTimeDbContextFactory<Applicati
         optionsBuilder.UseNpgsql("Host=localhost;Port=5432;Database=authentication_dev;Username=postgres;Password=postgres");
         optionsBuilder.UseOpenIddict<Guid>();
 
-        return new ApplicationDbContext(optionsBuilder.Options, new DesignTimeTenantProvider());
+        return new ApplicationDbContext(optionsBuilder.Options, new DesignTimeTenantProvider(), new DesignTimeEmpresaProvider());
     }
 
     private sealed class DesignTimeTenantProvider : ITenantProvider
     {
         public Guid TenantId => Guid.Empty;
+        public bool IsResolved => false;
+    }
+
+    private sealed class DesignTimeEmpresaProvider : IEmpresaProvider
+    {
+        public Guid EmpresaId => Guid.Empty;
         public bool IsResolved => false;
     }
 }

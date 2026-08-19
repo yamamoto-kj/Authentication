@@ -69,7 +69,7 @@ public sealed class GlobalExceptionHandler : IExceptionHandler
             NotFoundException =>
                 (StatusCodes.Status404NotFound, exception.Message, new Dictionary<string, object?>()),
 
-            TenantMismatchException =>
+            TenantMismatchException or EmpresaMismatchException =>
                 (StatusCodes.Status403Forbidden, "Access to the requested resource is denied.", new Dictionary<string, object?>()),
 
             DbUpdateConcurrencyException =>

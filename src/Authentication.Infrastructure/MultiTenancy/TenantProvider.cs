@@ -7,7 +7,7 @@ public static class TenantClaimTypes
 {
     public const string TenantId = "tenant_id";
 
-    /// <summary>Present on a final token alongside TenantId once phase 5 wires Empresa-level isolation.</summary>
+    /// <summary>Present on every final token alongside TenantId - see EmpresaProvider.</summary>
     public const string EmpresaId = "empresa_id";
 }
 
@@ -48,6 +48,33 @@ public class TenantProvider : ITenantProvider
     }
 
     public Guid TenantId => _tenantId;
+
+    public bool IsResolved => _isResolved;
+}
+
+/// <summary>
+/// Resolves the empresa strictly from the validated JWT's "empresa_id"
+/// claim - the finer-grained sibling of TenantProvider. Same rule applies:
+/// never trust a client-supplied value for this.
+/// </summary>
+public class EmpresaProvider : IEmpresaProvider
+{
+    private readonly Guid _empresaId;
+    private readonly bool _isResolved;
+
+    public EmpresaProvider(IHttpContextAccessor httpContextAccessor)
+    {
+        var claimValue = httpContextAccessor.HttpContext?.User
+            .FindFirst(TenantClaimTypes.EmpresaId)?.Value;
+
+        if (Guid.TryParse(claimValue, out var empresaId))
+        {
+            _empresaId = empresaId;
+            _isResolved = true;
+        }
+    }
+
+    public Guid EmpresaId => _empresaId;
 
     public bool IsResolved => _isResolved;
 }

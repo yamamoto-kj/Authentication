@@ -11,6 +11,12 @@ public sealed class TenantMismatchException : DomainException
         : base("The requested resource does not belong to the current tenant.") { }
 }
 
+public sealed class EmpresaMismatchException : DomainException
+{
+    public EmpresaMismatchException()
+        : base("The requested resource does not belong to the current empresa.") { }
+}
+
 public sealed class InsufficientStockException : DomainException
 {
     public InsufficientStockException(Guid productId)

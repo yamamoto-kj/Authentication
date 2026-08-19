@@ -37,6 +37,7 @@ public static class DependencyInjection
         services.AddScoped<IApplicationDbContext>(sp => sp.GetRequiredService<ApplicationDbContext>());
 
         services.AddScoped<ITenantProvider, TenantProvider>();
+        services.AddScoped<IEmpresaProvider, EmpresaProvider>();
         services.AddScoped<ICurrentUserService, CurrentUserService>();
 
         services

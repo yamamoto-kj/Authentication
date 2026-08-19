@@ -11,10 +11,20 @@ public sealed class FakeTenantProvider : ITenantProvider
     public bool IsResolved => true;
 }
 
+public sealed class FakeEmpresaProvider : IEmpresaProvider
+{
+    public FakeEmpresaProvider(Guid empresaId) => EmpresaId = empresaId;
+
+    public Guid EmpresaId { get; }
+
+    public bool IsResolved => true;
+}
+
 public sealed class FakeCurrentUserService : ICurrentUserService
 {
     public Guid? UserId => Guid.Empty;
     public string? UserName => "test-user";
     public Guid? TenantId => Guid.Empty;
+    public Guid? EmpresaId => Guid.Empty;
     public bool IsInRole(string role) => false;
 }

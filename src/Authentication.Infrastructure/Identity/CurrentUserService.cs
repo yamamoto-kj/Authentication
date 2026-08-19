@@ -37,5 +37,14 @@ public class CurrentUserService : ICurrentUserService
         }
     }
 
+    public Guid? EmpresaId
+    {
+        get
+        {
+            var value = User?.FindFirst(TenantClaimTypes.EmpresaId)?.Value;
+            return Guid.TryParse(value, out var id) ? id : null;
+        }
+    }
+
     public bool IsInRole(string role) => User?.IsInRole(role) ?? false;
 }

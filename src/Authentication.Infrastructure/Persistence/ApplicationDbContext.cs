@@ -19,11 +19,14 @@ public class ApplicationDbContext
     : IdentityDbContext<ApplicationUser, ApplicationRole, Guid>, IApplicationDbContext
 {
     private readonly ITenantProvider _tenantProvider;
+    private readonly IEmpresaProvider _empresaProvider;
 
-    public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options, ITenantProvider tenantProvider)
+    public ApplicationDbContext(
+        DbContextOptions<ApplicationDbContext> options, ITenantProvider tenantProvider, IEmpresaProvider empresaProvider)
         : base(options)
     {
         _tenantProvider = tenantProvider;
+        _empresaProvider = empresaProvider;
     }
 
     public DbSet<Tenant> Tenants => Set<Tenant>();
@@ -53,6 +56,9 @@ public class ApplicationDbContext
     /// </summary>
     private Guid CurrentTenantId => _tenantProvider.IsResolved ? _tenantProvider.TenantId : Guid.Empty;
 
+    /// <summary>Same "this."-instance-access shape as CurrentTenantId, and for the same reason.</summary>
+    private Guid CurrentEmpresaId => _empresaProvider.IsResolved ? _empresaProvider.EmpresaId : Guid.Empty;
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
@@ -61,7 +67,8 @@ public class ApplicationDbContext
 
         builder.UseOpenIddict<Guid>();
 
-        builder.Entity<Product>().HasQueryFilter(p => !p.IsDeleted && p.TenantId == CurrentTenantId);
+        builder.Entity<Product>().HasQueryFilter(p =>
+            !p.IsDeleted && p.TenantId == CurrentTenantId && p.EmpresaId == CurrentEmpresaId);
         builder.Entity<Tenant>().HasQueryFilter(t => !t.IsDeleted);
         builder.Entity<Empresa>().HasQueryFilter(e => !e.IsDeleted && e.TenantId == CurrentTenantId);
         builder.Entity<TenantRole>().HasQueryFilter(r => !r.IsDeleted && r.TenantId == CurrentTenantId);

@@ -23,15 +23,18 @@ public sealed class CreateProductCommandHandler : IRequestHandler<CreateProductC
 {
     private readonly IApplicationDbContext _context;
     private readonly ITenantProvider _tenantProvider;
+    private readonly IEmpresaProvider _empresaProvider;
     private readonly ICurrentUserService _currentUser;
 
     public CreateProductCommandHandler(
         IApplicationDbContext context,
         ITenantProvider tenantProvider,
+        IEmpresaProvider empresaProvider,
         ICurrentUserService currentUser)
     {
         _context = context;
         _tenantProvider = tenantProvider;
+        _empresaProvider = empresaProvider;
         _currentUser = currentUser;
     }
 
@@ -40,6 +43,7 @@ public sealed class CreateProductCommandHandler : IRequestHandler<CreateProductC
         var product = new Product
         {
             TenantId = _tenantProvider.TenantId,
+            EmpresaId = _empresaProvider.EmpresaId,
             Name = request.Name,
             Description = request.Description,
             Price = request.Price,

@@ -16,11 +16,14 @@ namespace Authentication.Infrastructure.Persistence.Interceptors;
 public class AuditableEntitySaveChangesInterceptor : SaveChangesInterceptor
 {
     private readonly ITenantProvider _tenantProvider;
+    private readonly IEmpresaProvider _empresaProvider;
     private readonly ICurrentUserService _currentUser;
 
-    public AuditableEntitySaveChangesInterceptor(ITenantProvider tenantProvider, ICurrentUserService currentUser)
+    public AuditableEntitySaveChangesInterceptor(
+        ITenantProvider tenantProvider, IEmpresaProvider empresaProvider, ICurrentUserService currentUser)
     {
         _tenantProvider = tenantProvider;
+        _empresaProvider = empresaProvider;
         _currentUser = currentUser;
     }
 
@@ -58,16 +61,29 @@ public class AuditableEntitySaveChangesInterceptor : SaveChangesInterceptor
                 entry.Entity.UpdatedBy = _currentUser.UserId?.ToString();
             }
 
-            if (entry.Entity is ITenantOwned owned && _tenantProvider.IsResolved)
+            if (entry.Entity is ITenantOwned tenantOwned && _tenantProvider.IsResolved)
             {
-                if (entry.State == EntityState.Added && owned.TenantId == Guid.Empty)
+                if (entry.State == EntityState.Added && tenantOwned.TenantId == Guid.Empty)
                 {
-                    owned.TenantId = _tenantProvider.TenantId;
+                    tenantOwned.TenantId = _tenantProvider.TenantId;
                 }
 
-                if (owned.TenantId != _tenantProvider.TenantId)
+                if (tenantOwned.TenantId != _tenantProvider.TenantId)
                 {
                     throw new TenantMismatchException();
+                }
+            }
+
+            if (entry.Entity is IEmpresaOwned empresaOwned && _empresaProvider.IsResolved)
+            {
+                if (entry.State == EntityState.Added && empresaOwned.EmpresaId == Guid.Empty)
+                {
+                    empresaOwned.EmpresaId = _empresaProvider.EmpresaId;
+                }
+
+                if (empresaOwned.EmpresaId != _empresaProvider.EmpresaId)
+                {
+                    throw new EmpresaMismatchException();
                 }
             }
         }

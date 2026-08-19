@@ -12,13 +12,18 @@ public class ProductConfiguration : IEntityTypeConfiguration<Product>
         builder.Property(p => p.Description).HasMaxLength(2000);
         builder.Property(p => p.Price).HasColumnType("decimal(18,2)");
 
-        // Composite index: every tenant-scoped list query filters on TenantId
-        // first, so it should always lead the index.
-        builder.HasIndex(p => new { p.TenantId, p.Name });
+        // Composite index: every list query filters on TenantId+EmpresaId
+        // first, so they should lead the index.
+        builder.HasIndex(p => new { p.TenantId, p.EmpresaId, p.Name });
 
-        builder.HasOne<Domain.Entities.Tenant>()
+        builder.HasOne<Tenant>()
             .WithMany()
             .HasForeignKey(p => p.TenantId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<Empresa>()
+            .WithMany()
+            .HasForeignKey(p => p.EmpresaId)
             .OnDelete(DeleteBehavior.Restrict);
     }
 }

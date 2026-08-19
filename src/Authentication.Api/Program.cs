@@ -40,7 +40,13 @@ builder.Services.AddAuthorization(options =>
         .RequireAuthenticatedUser()
         .Build();
 
-    options.AddPolicy("RequireTenant", policy => policy.RequireClaim(TenantClaimTypes.TenantId));
+    // Every final token carries tenant_id and empresa_id together (see
+    // AuthorizationController.HandleTenantSelectionAsync) - requiring both
+    // here is redundant in practice but cheap defense-in-depth against a
+    // hand-crafted or future token shape that only sets one.
+    options.AddPolicy("RequireTenant", policy => policy
+        .RequireClaim(TenantClaimTypes.TenantId)
+        .RequireClaim(TenantClaimTypes.EmpresaId));
 
     // Selection-scoped: intermediate token issued by the password grant
     // when the user has one or more active Vinculo, before a specific

@@ -8,5 +8,7 @@ public interface ICurrentUserService
 
     Guid? TenantId { get; }
 
+    Guid? EmpresaId { get; }
+
     bool IsInRole(string role);
 }
