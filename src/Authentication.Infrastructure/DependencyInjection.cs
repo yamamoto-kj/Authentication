@@ -40,6 +40,19 @@ public static class DependencyInjection
         services.AddScoped<IEmpresaProvider, EmpresaProvider>();
         services.AddScoped<ICurrentUserService, CurrentUserService>();
 
+        // WebAuthn/FIDO2 relying-party config. Origins/ServerDomain MUST
+        // match the client's actual URL in every non-dev environment -
+        // browsers enforce this at the ceremony level, so a mismatch here
+        // just makes every assertion/attestation fail, not a security hole.
+        services.AddSingleton<Fido2NetLib.IFido2>(sp => new Fido2NetLib.Fido2(new Fido2NetLib.Fido2Configuration
+        {
+            ServerDomain = configuration["WebAuthn:ServerDomain"] ?? "localhost",
+            ServerName = configuration["WebAuthn:ServerName"] ?? "Authentication API",
+            Origins = new HashSet<string>(
+                configuration.GetSection("WebAuthn:Origins").Get<string[]>() ?? new[] { "http://localhost:5080" })
+        }));
+        services.AddScoped<WebAuthnChallengeCache>();
+
         services
             .AddIdentityCore<ApplicationUser>(options =>
             {
@@ -74,17 +87,23 @@ public static class DependencyInjection
             })
             .AddServer(options =>
             {
-                // Two URIs, one token endpoint: /auth/select-context is the
-                // second step of the CPF-Global login flow (see
-                // AuthorizationController) - registering it here is what
-                // lets that action call SignIn() to mint a real,
+                // Four URIs, one token endpoint: each extra one is a further
+                // step of the CPF-Global login flow (see
+                // AuthorizationController) - registering them here is what
+                // lets those actions call SignIn() to mint a real,
                 // OpenIddict-tracked token instead of a hand-rolled one.
-                options.SetTokenEndpointUris("/connect/token", "/auth/select-context");
+                options.SetTokenEndpointUris(
+                    "/connect/token",
+                    "/auth/select-context",
+                    "/auth/2fa/totp/verify",
+                    "/auth/2fa/webauthn/assertion/verify");
 
                 options.AllowClientCredentialsFlow();
                 options.AllowPasswordFlow();
                 options.AllowRefreshTokenFlow();
                 options.AllowCustomFlow(CustomGrantTypes.TenantSelection);
+                options.AllowCustomFlow(CustomGrantTypes.TwoFactorTotpVerify);
+                options.AllowCustomFlow(CustomGrantTypes.TwoFactorWebAuthnVerify);
 
                 options.SetAccessTokenLifetime(TimeSpan.FromMinutes(15));
                 options.SetRefreshTokenLifetime(TimeSpan.FromDays(14));

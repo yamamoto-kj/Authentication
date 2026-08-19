@@ -12,11 +12,18 @@ namespace Authentication.Infrastructure.Identity;
 /// second column would just be a redundant, driftable copy of the same
 /// value.
 ///
-/// TwoFactorEnabled is ASP.NET Identity's own built-in flag, reused as-is:
-/// SignInManager.CheckPasswordSignInAsync already returns
-/// SignInResult.RequiresTwoFactor when it's set, which is exactly the gate
-/// this system needs. Only an admin endpoint may set it (see
-/// AdminUsersController, phase 2) - there is no self-service toggle.
+/// TwoFactorRequired is this system's own flag, deliberately NOT the
+/// Identity-native TwoFactorEnabled: SignInManager's automatic
+/// RequiresTwoFactor detection only recognizes Identity's built-in
+/// "token provider" 2FA methods (TOTP, email, SMS) via
+/// GetValidTwoFactorProvidersAsync - a WebAuthn-only user would never
+/// trip it, since WebAuthn is a challenge/response credential, not a
+/// token provider. AuthorizationController.HandlePasswordAsync computes
+/// the 2FA gate itself instead of relying on that built-in mechanism.
+/// Only an admin endpoint may set this (see AdminUsuariosController) -
+/// there is no self-service toggle for the *requirement*, though a user
+/// with the requirement on still self-enrolls their own factor (nobody
+/// else can hold their TOTP secret or WebAuthn private key for them).
 /// </summary>
 public class ApplicationUser : IdentityUser<Guid>
 {
@@ -29,6 +36,8 @@ public class ApplicationUser : IdentityUser<Guid>
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 
     public bool IsActive { get; set; } = true;
+
+    public bool TwoFactorRequired { get; set; }
 }
 
 public class ApplicationRole : IdentityRole<Guid>

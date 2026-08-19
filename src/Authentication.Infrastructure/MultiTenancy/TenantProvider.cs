@@ -33,6 +33,21 @@ public static class SelectionClaimTypes
 {
     public const string Purpose = "purpose";
     public const string TenantSelectionPurpose = "tenant_selection";
+
+    /// <summary>
+    /// Issued instead of a selection token when 2FA is required for the
+    /// user but they have no TOTP/WebAuthn credential enrolled yet - good
+    /// only for the /auth/2fa/*/enroll/* endpoints. Login is blocked until
+    /// enrollment completes and the user authenticates again.
+    /// </summary>
+    public const string TwoFactorEnrollPurpose = "2fa_enroll";
+
+    /// <summary>
+    /// Issued instead of a selection token when 2FA is required and the
+    /// user already has a credential - good only for the
+    /// /auth/2fa/*/verify endpoints, which complete the login on success.
+    /// </summary>
+    public const string TwoFactorChallengePurpose = "2fa_challenge";
 }
 
 /// <summary>

@@ -152,4 +152,33 @@ public class AdminUsuariosController : ControllerBase
         // instead of using CreatedAtAction.
         return StatusCode(StatusCodes.Status201Created, new CriarUsuarioResponse(user.Id, cpf, setPasswordToken));
     }
+
+    /// <summary>
+    /// Turns 2FA on/off *as a requirement* for a user. Turning it on does
+    /// not itself enroll any factor - the user still has to set up their
+    /// own TOTP/WebAuthn credential (see the /auth/2fa endpoints) before
+    /// they can complete a login; until they do, the password grant issues
+    /// an enrollment-only token instead of letting them in.
+    /// </summary>
+    [HttpPatch("{id:guid}/2fa")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> SetTwoFactorRequired(
+        Guid id, [FromBody] DefinirDoisFatoresRequest request, CancellationToken cancellationToken)
+    {
+        var user = await _userManager.FindByIdAsync(id.ToString());
+        if (user is null)
+        {
+            return NotFound();
+        }
+
+        user.TwoFactorRequired = request.Required;
+        var result = await _userManager.UpdateAsync(user);
+        if (!result.Succeeded)
+        {
+            return BadRequest(new { errors = result.Errors.Select(e => e.Description) });
+        }
+
+        return NoContent();
+    }
 }

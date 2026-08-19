@@ -1,10 +1,14 @@
 using System.Collections.Immutable;
 using System.Security.Claims;
+using System.Text.Json;
 using Authentication.Application.Common.Interfaces;
+using Authentication.Domain.Entities;
 using Authentication.Domain.Enums;
 using Authentication.Infrastructure.Identity;
 using Authentication.Infrastructure.MultiTenancy;
 using Authentication.Api.Extensions;
+using Fido2NetLib;
+using Fido2NetLib.Objects;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
@@ -53,23 +57,31 @@ public class AuthorizationController : ControllerBase
     private readonly IApplicationDbContext _dbContext;
     private readonly IOpenIddictApplicationManager _applicationManager;
     private readonly IOpenIddictScopeManager _scopeManager;
+    private readonly IFido2 _fido2;
+    private readonly WebAuthnChallengeCache _webAuthnChallengeCache;
 
     public AuthorizationController(
         UserManager<ApplicationUser> userManager,
         SignInManager<ApplicationUser> signInManager,
         IApplicationDbContext dbContext,
         IOpenIddictApplicationManager applicationManager,
-        IOpenIddictScopeManager scopeManager)
+        IOpenIddictScopeManager scopeManager,
+        IFido2 fido2,
+        WebAuthnChallengeCache webAuthnChallengeCache)
     {
         _userManager = userManager;
         _signInManager = signInManager;
         _dbContext = dbContext;
         _applicationManager = applicationManager;
         _scopeManager = scopeManager;
+        _fido2 = fido2;
+        _webAuthnChallengeCache = webAuthnChallengeCache;
     }
 
     [HttpPost("token")]
     [HttpPost("/auth/select-context")]
+    [HttpPost("/auth/2fa/totp/verify")]
+    [HttpPost("/auth/2fa/webauthn/assertion/verify")]
     [IgnoreAntiforgeryToken]
     [Produces("application/json")]
     public async Task<IActionResult> Exchange()
@@ -95,6 +107,16 @@ public class AuthorizationController : ControllerBase
         if (request.GrantType == CustomGrantTypes.TenantSelection)
         {
             return await HandleTenantSelectionAsync(request);
+        }
+
+        if (request.GrantType == CustomGrantTypes.TwoFactorTotpVerify)
+        {
+            return await HandleTotpVerifyAsync(request);
+        }
+
+        if (request.GrantType == CustomGrantTypes.TwoFactorWebAuthnVerify)
+        {
+            return await HandleWebAuthnVerifyAsync(request);
         }
 
         return Forbid(
@@ -149,14 +171,37 @@ public class AuthorizationController : ControllerBase
 
         // Uses Identity's lockout-aware password check so brute-force
         // attempts trip the same account lockout as the normal login path.
-        // TwoFactorRequired users get SignInResult.RequiresTwoFactor here -
-        // treated as a plain failure for now; the 2FA gate is phase 4.
+        // Not CheckPasswordSignInAsync's own RequiresTwoFactor branching -
+        // see ApplicationUser's doc comment on why the 2FA gate below is
+        // computed by hand instead (WebAuthn-only users would never trip
+        // Identity's built-in detection).
         var result = await _signInManager.CheckPasswordSignInAsync(user, request.Password!, lockoutOnFailure: true);
         if (!result.Succeeded)
         {
             return Forbidden(Errors.InvalidGrant, "CPF/senha inválidos.");
         }
 
+        if (user.TwoFactorRequired)
+        {
+            var purpose = await HasEnrolledFactorAsync(user)
+                ? SelectionClaimTypes.TwoFactorChallengePurpose
+                : SelectionClaimTypes.TwoFactorEnrollPurpose;
+
+            return await IssuePurposeTokenAsync(user, purpose);
+        }
+
+        return await IssuePostCredentialTokenAsync(user, request.GetScopes());
+    }
+
+    /// <summary>
+    /// Shared tail of every grant that ends in "the caller is definitely
+    /// this Usuario, mint whatever comes next": the plain password grant
+    /// when 2FA isn't required, and both 2FA verify grants on success.
+    /// Decides between a platform-admin token, a selection token, or
+    /// rejection, exactly as the password grant always has.
+    /// </summary>
+    private async Task<IActionResult> IssuePostCredentialTokenAsync(ApplicationUser user, ImmutableArray<string> requestedScopes)
+    {
         var isPlatformAdmin = await _userManager.IsInRoleAsync(user, PlatformRoles.PlatformAdmin);
 
         // Cross-tenant by design: no tenant is resolved yet at this point in
@@ -181,15 +226,14 @@ public class AuthorizationController : ControllerBase
             }
 
             identity = BuildUserIdentity(user, tenantId: null, empresaId: null, roleName: null, permissions: ImmutableArray<string>.Empty, isPlatformAdmin: true);
-            identity.SetScopes(request.GetScopes());
+            identity.SetScopes(requestedScopes);
         }
         else
         {
             // One or many Vinculo: always a selection token, never a full
-            // one, directly from the password grant - see the class-level
-            // doc comment for why even the single-tenant case goes through
-            // this same path.
-            identity = BuildSelectionIdentity(user);
+            // one, directly from here - see the class-level doc comment for
+            // why even the single-tenant case goes through this same path.
+            identity = BuildPurposeIdentity(user, SelectionClaimTypes.TenantSelectionPurpose);
             // No scopes granted here (and no refresh token as a result for
             // most clients) - this token is only ever meant to be traded
             // immediately for a full one via the tenant_selection grant.
@@ -199,6 +243,28 @@ public class AuthorizationController : ControllerBase
         identity.SetDestinations(GetDestinations);
 
         return SignIn(new ClaimsPrincipal(identity), OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
+    }
+
+    /// <summary>Issues a purpose-only token (2FA enrollment/challenge) and signs in with it directly.</summary>
+    private async Task<IActionResult> IssuePurposeTokenAsync(ApplicationUser user, string purpose)
+    {
+        var identity = BuildPurposeIdentity(user, purpose);
+        identity.SetResources(await _scopeManager.ListResourcesAsync(identity.GetScopes()).ToListAsync());
+        identity.SetDestinations(GetDestinations);
+
+        return SignIn(new ClaimsPrincipal(identity), OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
+    }
+
+    /// <summary>TOTP counts once a key exists (Identity has no separate "confirmed" flag); WebAuthn counts once any credential is registered.</summary>
+    private async Task<bool> HasEnrolledFactorAsync(ApplicationUser user)
+    {
+        var totpKey = await _userManager.GetAuthenticatorKeyAsync(user);
+        if (totpKey is not null)
+        {
+            return true;
+        }
+
+        return await _dbContext.WebAuthnCredentials.AnyAsync(c => c.UsuarioId == user.Id);
     }
 
     private async Task<IActionResult> HandleTenantSelectionAsync(OpenIddictRequest request)
@@ -274,6 +340,112 @@ public class AuthorizationController : ControllerBase
         identity.SetDestinations(GetDestinations);
 
         return SignIn(new ClaimsPrincipal(identity), OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
+    }
+
+    private async Task<IActionResult> HandleTotpVerifyAsync(OpenIddictRequest request)
+    {
+        // Same Bearer-authenticated-via-default-scheme trick as
+        // HandleTenantSelectionAsync: the 2FA challenge token was sent as a
+        // normal Authorization header, already validated before this action ran.
+        if (User.FindFirst(SelectionClaimTypes.Purpose)?.Value != SelectionClaimTypes.TwoFactorChallengePurpose)
+        {
+            return Forbidden(Errors.InvalidGrant, "Token de desafio de dois fatores ausente ou inválido.");
+        }
+
+        var userId = User.FindFirst(Claims.Subject)?.Value;
+        var user = userId is not null ? await _userManager.FindByIdAsync(userId) : null;
+        if (user is null || !user.IsActive)
+        {
+            return Forbidden(Errors.InvalidGrant, "Token de desafio de dois fatores ausente ou inválido.");
+        }
+
+        var code = request.GetParameter("code")?.ToString();
+        if (string.IsNullOrEmpty(code))
+        {
+            return Forbidden(Errors.InvalidRequest, "Parâmetro 'code' ausente.");
+        }
+
+        var validCode = await _userManager.VerifyTwoFactorTokenAsync(user, TokenOptions.DefaultAuthenticatorProvider, code);
+        if (!validCode)
+        {
+            return Forbidden(Errors.InvalidGrant, "Código inválido.");
+        }
+
+        return await IssuePostCredentialTokenAsync(user, request.GetScopes());
+    }
+
+    private async Task<IActionResult> HandleWebAuthnVerifyAsync(OpenIddictRequest request)
+    {
+        if (User.FindFirst(SelectionClaimTypes.Purpose)?.Value != SelectionClaimTypes.TwoFactorChallengePurpose)
+        {
+            return Forbidden(Errors.InvalidGrant, "Token de desafio de dois fatores ausente ou inválido.");
+        }
+
+        var userId = User.FindFirst(Claims.Subject)?.Value;
+        var user = userId is not null ? await _userManager.FindByIdAsync(userId) : null;
+        if (user is null || !user.IsActive)
+        {
+            return Forbidden(Errors.InvalidGrant, "Token de desafio de dois fatores ausente ou inválido.");
+        }
+
+        var responseJson = request.GetParameter("assertion_response")?.ToString();
+        if (string.IsNullOrEmpty(responseJson))
+        {
+            return Forbidden(Errors.InvalidRequest, "Parâmetro 'assertion_response' ausente.");
+        }
+
+        // One-shot: TakeAssertionOptionsAsync removes the entry, so a
+        // replayed verify call (same or different response) always fails
+        // here instead of re-validating against a stale challenge.
+        var options = await _webAuthnChallengeCache.TakeAssertionOptionsAsync(user.Id);
+        if (options is null)
+        {
+            return Forbidden(Errors.InvalidGrant, "Nenhum desafio pendente para este usuário. Solicite um novo.");
+        }
+
+        AuthenticatorAssertionRawResponse assertionResponse;
+        try
+        {
+            assertionResponse = JsonSerializer.Deserialize<AuthenticatorAssertionRawResponse>(responseJson)
+                ?? throw new JsonException("Empty payload.");
+        }
+        catch (JsonException)
+        {
+            return Forbidden(Errors.InvalidRequest, "Parâmetro 'assertion_response' malformado.");
+        }
+
+        var credential = await _dbContext.WebAuthnCredentials
+            .FirstOrDefaultAsync(c => c.UsuarioId == user.Id && c.CredentialId == assertionResponse.RawId);
+        if (credential is null)
+        {
+            return Forbidden(Errors.InvalidGrant, "Credencial não reconhecida.");
+        }
+
+        VerifyAssertionResult assertionResult;
+        try
+        {
+            assertionResult = await _fido2.MakeAssertionAsync(new MakeAssertionParams
+            {
+                AssertionResponse = assertionResponse,
+                OriginalOptions = options,
+                StoredPublicKey = credential.PublicKey,
+                StoredSignatureCounter = credential.SignCount,
+                IsUserHandleOwnerOfCredentialIdCallback = (args, _) => Task.FromResult(args.UserHandle.SequenceEqual(user.Id.ToByteArray()))
+            });
+        }
+        catch (Fido2VerificationException)
+        {
+            return Forbidden(Errors.InvalidGrant, "Falha na verificação da chave de segurança.");
+        }
+
+        // Strictly-increasing counter check: a non-increasing value means a
+        // cloned authenticator. Fido2NetLib validates this internally
+        // against StoredSignatureCounter and throws above if it fails, so
+        // reaching here means it held - just persist the new value.
+        credential.SignCount = assertionResult.SignCount;
+        await _dbContext.SaveChangesAsync(default);
+
+        return await IssuePostCredentialTokenAsync(user, request.GetScopes());
     }
 
     private async Task<IActionResult> HandleRefreshTokenAsync()
@@ -396,11 +568,13 @@ public class AuthorizationController : ControllerBase
     }
 
     /// <summary>
-    /// Intermediate credential: identifies the user (Subject) and nothing
-    /// else - no tenant, no role, no empresa. Only ever meant to be handed
-    /// straight back to GET /auth/contexts or the tenant_selection grant.
+    /// Intermediate credential: identifies the user (Subject) and a single
+    /// "purpose" claim - no tenant, no role, no empresa. Only ever meant to
+    /// be handed straight back to the one or two endpoints that check for
+    /// that specific purpose (tenant selection, or the matching half of the
+    /// 2FA enroll/challenge pair).
     /// </summary>
-    private static ClaimsIdentity BuildSelectionIdentity(ApplicationUser user)
+    private static ClaimsIdentity BuildPurposeIdentity(ApplicationUser user, string purpose)
     {
         var identity = new ClaimsIdentity(
             authenticationType: TokenValidationParameters.DefaultAuthenticationType,
@@ -408,7 +582,7 @@ public class AuthorizationController : ControllerBase
             roleType: Claims.Role);
 
         identity.SetClaim(Claims.Subject, user.Id.ToString());
-        identity.SetClaim(SelectionClaimTypes.Purpose, SelectionClaimTypes.TenantSelectionPurpose);
+        identity.SetClaim(SelectionClaimTypes.Purpose, purpose);
         identity.SetScopes(ImmutableArray<string>.Empty);
 
         return identity;

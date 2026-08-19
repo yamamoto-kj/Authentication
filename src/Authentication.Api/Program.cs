@@ -55,6 +55,12 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("TenantSelection", policy => policy
         .RequireClaim(SelectionClaimTypes.Purpose, SelectionClaimTypes.TenantSelectionPurpose));
 
+    // 2FA gate tokens - good only for their respective /auth/2fa/* endpoints.
+    options.AddPolicy("TwoFactorEnrollment", policy => policy
+        .RequireClaim(SelectionClaimTypes.Purpose, SelectionClaimTypes.TwoFactorEnrollPurpose));
+    options.AddPolicy("TwoFactorChallenge", policy => policy
+        .RequireClaim(SelectionClaimTypes.Purpose, SelectionClaimTypes.TwoFactorChallengePurpose));
+
     // Platform-level: no tenant context, only used by cross-tenant admin
     // operations (e.g. provisioning a brand-new Usuario).
     options.AddPolicy(PlatformRoles.PlatformAdmin, policy =>

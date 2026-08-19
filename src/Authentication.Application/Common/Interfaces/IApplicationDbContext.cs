@@ -28,6 +28,8 @@ public interface IApplicationDbContext
 
     DbSet<TenantRolePermission> TenantRolePermissions { get; }
 
+    DbSet<WebAuthnCredential> WebAuthnCredentials { get; }
+
     EntityEntry<TEntity> Entry<TEntity>(TEntity entity) where TEntity : class;
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken);

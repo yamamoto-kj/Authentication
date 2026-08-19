@@ -45,6 +45,8 @@ public class ApplicationDbContext
 
     public DbSet<TenantRolePermission> TenantRolePermissions => Set<TenantRolePermission>();
 
+    public DbSet<WebAuthnCredential> WebAuthnCredentials => Set<WebAuthnCredential>();
+
     /// <summary>
     /// Read by the query filters below via an implicit "this." instance
     /// access, which EF Core specifically recognizes and re-evaluates for
@@ -73,6 +75,10 @@ public class ApplicationDbContext
         builder.Entity<Empresa>().HasQueryFilter(e => !e.IsDeleted && e.TenantId == CurrentTenantId);
         builder.Entity<TenantRole>().HasQueryFilter(r => !r.IsDeleted && r.TenantId == CurrentTenantId);
         builder.Entity<Permission>().HasQueryFilter(p => !p.IsDeleted);
+
+        // Global to the Usuario, not tenant-scoped - 2FA is a property of
+        // the person, not of any one Grupo Econômico they belong to.
+        builder.Entity<WebAuthnCredential>().HasQueryFilter(c => !c.IsDeleted);
 
         // Vinculo intentionally has NO tenant query filter: the login flow
         // must look up a user's memberships *across every tenant* before any

@@ -171,6 +171,8 @@ public static class DbSeeder
                     Permissions.GrantTypes.Password,
                     Permissions.GrantTypes.RefreshToken,
                     Permissions.Prefixes.GrantType + CustomGrantTypes.TenantSelection,
+                    Permissions.Prefixes.GrantType + CustomGrantTypes.TwoFactorTotpVerify,
+                    Permissions.Prefixes.GrantType + CustomGrantTypes.TwoFactorWebAuthnVerify,
                     Permissions.Prefixes.Scope + "api"
                 }
             });

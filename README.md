@@ -22,50 +22,141 @@ tests/
 A regra de dependência é sempre "de fora para dentro": `Api` depende de
 `Infrastructure`/`Application`/`Domain`; `Domain` não depende de nada.
 
-## Multi-tenancy
+## Identidade e multi-tenancy (CPF Global)
 
-- **Estratégia**: isolamento por linha (row-level) em um banco compartilhado
-  — todo recurso de negócio implementa `ITenantOwned` e carrega `TenantId`.
-- **Resolução do tenant**: exclusivamente pela claim `tenant_id` do JWT
-  validado (nunca por header/rota informado pelo cliente em endpoints
-  autenticados — isso evitaria que um chamador se passasse por outro
-  tenant apenas trocando um header).
-- **Aplicação do isolamento**: um *global query filter* do EF Core
-  (`ApplicationDbContext.OnModelCreating`) filtra toda consulta a
-  `Products` por `TenantId == CurrentTenantId`, reavaliado a cada instância
-  de `DbContext` (ver comentário no código sobre a pegadinha clássica de
-  capturar um serviço *scoped* dentro do modelo, que fica em cache
-  globalmente).
-- **Defesa em profundidade**: um `SaveChangesInterceptor`
-  (`AuditableEntitySaveChangesInterceptor`) rejeita, no `SaveChanges`,
-  qualquer tentativa de gravar uma linha com `TenantId` diferente do tenant
-  autenticado — protege contra bug de handler, não apenas contra ataque.
-- **Teste automatizado**: `tests/.../TenantIsolationTests.cs` prova que um
-  tenant não enxerga registros de outro e que a gravação cross-tenant lança
-  `TenantMismatchException`.
+Hierarquia de três níveis: um `Usuario` é uma identidade global (login por
+CPF), que pode ter um `Vinculo` (membership) com qualquer número de
+`Tenant`s (Grupos Econômicos), cada um com uma ou mais `Empresa`s (CNPJs).
 
-## OAuth2 (OpenIddict)
+```
+Usuario (CPF, global) 1─N Vinculo N─1 Tenant (Grupo Econômico) 1─N Empresa (CNPJ)
+                              │
+                              └─1 TenantRole ──N─┬N Permission (catálogo global)
+```
 
-Servidor de autorização próprio, RFC 6749, endpoint único `POST
-/connect/token`:
+- **Sem auto-cadastro**: nenhum endpoint cria um `Usuario` livremente — só
+  um *platform admin* via `POST /admin/usuarios` (ver "Provisionamento"
+  abaixo). Um admin de um tenant pode convidar um CPF **já existente** para
+  o seu próprio grupo via `POST /admin/vinculos`, sem precisar de
+  privilégio de plataforma.
+- **Estratégia de isolamento**: row-level em banco compartilhado — toda
+  entidade de negócio implementa `ITenantOwned`/`IEmpresaOwned` e carrega
+  `TenantId`/`EmpresaId`.
+- **Resolução**: exclusivamente pelas claims `tenant_id`/`empresa_id` do
+  JWT validado — nunca por header/rota informado pelo cliente em endpoints
+  autenticados.
+- **Aplicação do isolamento**: *global query filters* do EF Core
+  (`ApplicationDbContext.OnModelCreating`) filtram `Products` por
+  `TenantId == CurrentTenantId && EmpresaId == CurrentEmpresaId`,
+  reavaliados a cada instância de `DbContext` (ver comentário no código
+  sobre a pegadinha clássica de capturar um serviço *scoped* dentro do
+  modelo, que fica em cache globalmente).
+- **Defesa em profundidade**: `AuditableEntitySaveChangesInterceptor`
+  rejeita, no `SaveChanges`, qualquer gravação com `TenantId`/`EmpresaId`
+  diferente do contexto autenticado.
+- **Permissões**: cada `TenantRole` concede um subconjunto do catálogo
+  global de `Permission`s (`PermissionKeys`); o token final carrega essas
+  chaves na claim `permissions`, e os endpoints exigem policies
+  específicas (ex: `produtos:gerenciar`, `usuarios:convidar`) — nunca
+  checam o nome do papel por string.
+- **Testes automatizados**: `tests/.../TenantIsolationTests.cs` prova
+  isolamento por tenant *e* por empresa (dois usuários do mesmo grupo,
+  empresas diferentes, não enxergam os dados um do outro), e que a
+  gravação cross-tenant/cross-empresa lança `TenantMismatchException`/
+  `EmpresaMismatchException`.
 
-| Grant type | Uso |
+## OAuth2 (OpenIddict) e o fluxo de login
+
+Servidor de autorização próprio (RFC 6749), com um único endpoint de token
+físico (`/connect/token`) registrado sob múltiplas URIs — cada uma cobre
+uma etapa do fluxo de login, usando *extension grant types* customizados
+(RFC 6749 §4.5) para reaproveitar 100% da infraestrutura OAuth (emissão,
+revogação, refresh rotativo) em vez de emitir tokens "na mão".
+
+```
+CPF+senha (POST /connect/token, grant password)
+      │
+      ▼
+2FA obrigatório para o usuário?
+      │ não                              │ sim
+      ▼                                  ▼
+token de seleção                  já tem fator cadastrado?
+(sem tenant/empresa)                 │ não          │ sim
+      │                              ▼              ▼
+      │                       token de           token de
+      │                       enrollment          challenge
+      │                       (/auth/2fa/*/enroll/*)  │
+      │                                            (/auth/2fa/totp/verify ou
+      │                                             /auth/2fa/webauthn/assertion/verify)
+      │                                                 │
+      └─────────────────────────┬───────────────────────┘
+                                 ▼
+                  GET /auth/contexts (lista grupos/empresas)
+                                 │
+                  POST /auth/select-context (tenant_id [+ empresa_id])
+                                 ▼
+                    token final (tenant_id + empresa_id + role + permissions)
+```
+
+| Grant type (URI) | Uso |
 |---|---|
-| `client_credentials` | Comunicação serviço-a-serviço; o tenant vem de uma *property* do client OAuth. |
-| `password` | Login de usuário para clientes *first-party* de confiança (SPA/mobile próprios). **Não é recomendado para clients de terceiros** — para esses, prefira Authorization Code + PKCE. |
-| `refresh_token` | *Rolling refresh*: cada uso emite um novo refresh token e revoga o anterior, reduzindo o impacto de um token vazado. |
+| `client_credentials` (`/connect/token`) | Comunicação serviço-a-serviço; o tenant vem de uma *property* do client OAuth. |
+| `password` (`/connect/token`) | CPF+senha. Nunca emite token final direto — sempre um token de seleção ou de 2FA. |
+| `refresh_token` (`/connect/token`) | *Rolling refresh*: cada uso emite um novo refresh token e revoga o anterior. |
+| `urn:authentication:grant-type:tenant_selection` (`/auth/select-context`) | Troca o token de seleção + `tenant_id`/`empresa_id` escolhidos pelo token final. |
+| `urn:authentication:grant-type:2fa_totp_verify` (`/auth/2fa/totp/verify`) | Completa o login com um código TOTP. |
+| `urn:authentication:grant-type:2fa_webauthn_verify` (`/auth/2fa/webauthn/assertion/verify`) | Completa o login com uma assertion WebAuthn/passkey. |
 
-Access tokens são JWT (RSA + criptografados), carregam a claim `tenant_id`
-e expiram em 15 minutos; refresh tokens expiram em 14 dias. Em
-`Development`, certificados de assinatura/criptografia são efêmeros
-(`AddDevelopmentSigningCertificate`); em produção, configure
-`OpenIddict:SigningCertificate` / `EncryptionCertificate` com certificados
-reais (variáveis de ambiente ou um secret manager — nunca em
-`appsettings.json` commitado).
+Access tokens são JWT (RSA + criptografados) e expiram em 15 minutos;
+refresh tokens expiram em 14 dias. Em `Development`, certificados de
+assinatura/criptografia são efêmeros (`AddDevelopmentSigningCertificate`);
+em produção, configure `OpenIddict:SigningCertificate`/
+`EncryptionCertificate` com certificados reais (variáveis de ambiente ou
+um secret manager — nunca em `appsettings.json` commitado).
 
 Aplicações OAuth e tokens ficam persistidos no Postgres (não em memória),
 então qualquer instância da API atrás do load balancer processa qualquer
 requisição — sem *sticky sessions*.
+
+## Provisionamento de usuários
+
+Não existe auto-cadastro. Dois caminhos, dois níveis de privilégio:
+
+- **`POST /admin/usuarios`** (policy `PlatformAdmin`, role global de
+  plataforma) — cria um `Usuario` novo (CPF/nome/email), sem senha, e
+  opcionalmente já com um `Vinculo` inicial. Retorna um token de
+  redefinição de senha; em produção isso deve ser enviado por e-mail, não
+  devolvido na resposta (não há infraestrutura de e-mail neste projeto
+  ainda — a resposta direta é só uma conveniência de desenvolvimento).
+- **`POST /admin/vinculos`** (policy `usuarios:convidar`, dentro do
+  próprio tenant do chamador) — vincula um CPF **já cadastrado** ao grupo
+  econômico de quem chama, sem precisar de privilégio de plataforma.
+- **`POST /auth/set-password`** (público, com o token de redefinição) —
+  ativa a conta e confirma o e-mail.
+
+## Autenticação de dois fatores (TOTP + WebAuthn)
+
+Parametrizável por usuário e controlada só por um platform admin
+(`PATCH /admin/usuarios/{id}/2fa`) — o usuário não pode ligar/desligar a
+*exigência* sozinho, mas é sempre ele quem cadastra o próprio fator
+(ninguém mais pode gerar um segredo TOTP ou uma chave privada WebAuthn em
+nome de outra pessoa).
+
+- **TOTP**: reaproveita o suporte nativo do ASP.NET Identity
+  (`AuthenticatorTokenProvider`) — `POST /auth/2fa/totp/enroll/start`
+  gera o segredo/QR code, `.../enroll/confirm` valida o primeiro código.
+- **WebAuthn/Passkey**: via [Fido2NetLib](https://github.com/passwordless-lib/fido2-net-lib)
+  (`Fido2` NuGet). `POST /auth/2fa/webauthn/enroll/options` +
+  `.../enroll/verify` fazem a cerimônia de registro; o desafio gerado pelo
+  servidor fica em cache (Redis) entre as duas chamadas — nunca confia num
+  desafio ecoado pelo cliente.
+- O gate de 2FA no login é calculado explicitamente em código (não usa o
+  `TwoFactorEnabled`/`RequiresTwoFactor` nativos do Identity), porque a
+  detecção automática do Identity só reconhece provedores de token
+  (TOTP/SMS/e-mail) — um usuário só com WebAuthn nunca dispararia o gate
+  nativo. Configure `WebAuthn:ServerDomain`/`Origins` no `appsettings` para
+  bater com o domínio real da aplicação cliente (o navegador rejeita a
+  cerimônia se não bater).
 
 ## Segurança
 
@@ -120,28 +211,43 @@ dotnet run --project src/Authentication.Api
 
 Em `Development`, o `DbSeeder` roda automaticamente e cria:
 
-- Tenant `demo` (slug `demo`)
+- Tenant `demo` (slug `demo`), com duas empresas (Matriz e Filial)
 - Client OAuth `demo-service-client` / `demo-service-secret-change-me`
   (`client_credentials`)
-- Client OAuth `demo-first-party-client` (público, `password` grant)
-- Usuário `demo@demo-tenant.local` / `ChangeMe!2026#Secure`
+- Client OAuth `demo-first-party-client` (público, `password` grant +
+  grants customizados de seleção/2FA)
+- Usuário demo `52998224725` / `ChangeMe!2026#Secure` — papel `admin`
+  (permissões `produtos:gerenciar` e `usuarios:convidar`) no tenant `demo`,
+  com acesso às duas empresas
+- Platform admin `11144477735` / `ChangeMe!2026#PlatformAdmin` — sem
+  nenhum `Vinculo`, só para `POST /admin/usuarios`
 
-### Obtendo um token
+### Login completo (CPF → seleção de contexto → token final)
 
 ```bash
-curl -X POST http://localhost:5080/connect/token \
-  -d grant_type=password \
+# 1. CPF + senha -> token de seleção (a menos que só haja 1 grupo/1 empresa
+#    e o front decida pular a pergunta, todo login passa por aqui)
+SEL=$(curl -s -X POST http://localhost:5080/connect/token \
+  -d grant_type=password -d client_id=demo-first-party-client \
+  -d username=52998224725 -d password="ChangeMe!2026#Secure" -d scope=api)
+SEL_TOKEN=$(echo "$SEL" | jq -r .access_token)
+
+# 2. Lista grupos/empresas disponíveis
+curl -s http://localhost:5080/auth/contexts -H "Authorization: Bearer $SEL_TOKEN"
+
+# 3. Escolhe o contexto -> token final
+curl -X POST http://localhost:5080/auth/select-context \
+  -H "Authorization: Bearer $SEL_TOKEN" \
+  -d grant_type=urn:authentication:grant-type:tenant_selection \
   -d client_id=demo-first-party-client \
-  -d username=demo@demo-tenant.local \
-  -d password="ChangeMe!2026#Secure" \
-  -d scope=api
+  -d tenant_id=<tenantId> -d empresa_id=<empresaId>
 ```
 
 ### Chamando a API
 
 ```bash
 curl http://localhost:5080/api/v1/products \
-  -H "Authorization: Bearer <access_token>"
+  -H "Authorization: Bearer <access_token_final>"
 ```
 
 Swagger UI disponível em `/swagger` (apenas em `Development`).
@@ -181,3 +287,8 @@ dotnet ef database update \
 - [ ] Trocar a senha do usuário/client de demonstração ou remover o
       `DbSeeder` do ambiente de produção (ele só roda em `Development`).
 - [ ] Colocar a API atrás de um proxy/load balancer que termina TLS.
+- [ ] Configurar `WebAuthn:ServerDomain`/`ServerName`/`Origins` com o
+      domínio real da(s) aplicação(ões) cliente.
+- [ ] Implementar entrega do token de "definir senha" (`/admin/usuarios`)
+      por e-mail — hoje ele volta na resposta HTTP como conveniência de
+      desenvolvimento, o que nunca deve acontecer em produção.
